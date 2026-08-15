@@ -1,0 +1,25 @@
+[package]
+name = "wisp-app"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "wisp"
+path = "src/main.rs"
+
+[dependencies]
+wisp-core.workspace = true
+
+gpui.workspace = true
+gpui_platform.workspace = true
+gpui-component.workspace = true
+gpui-component-assets.workspace = true
+raw-window-handle.workspace = true
+
+global-hotkey.workspace = true
+tray-icon.workspace = true
+windows.workspace = true
+
+anyhow.workspace = true
+crossbeam-channel.workspace = true

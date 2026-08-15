@@ -1,0 +1,12 @@
+[package]
+name = "wisp-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+crossbeam-channel.workspace = true
+windows.workspace = true
+rusqlite = { version = "0.32", features = ["bundled"] }
+arboard = "3"
