@@ -10,7 +10,7 @@ use std::{path::Path, sync::Arc, thread, time::Duration};
 use anyhow::{Context as _, Result};
 use crossbeam_channel::Sender;
 
-use crate::{clip::Clip, store::ClipStore, watcher};
+use crate::{clip::Clip, paste, store::ClipStore, watcher};
 
 /// 超过该体量的文本不进历史（防止异常复制撑爆列表与磁盘）
 const MAX_TEXT_BYTES: usize = 2 * 1024 * 1024;
@@ -69,6 +69,17 @@ impl ClipboardService {
         arboard::Clipboard::new()
             .and_then(|mut clipboard| clipboard.set_text(content))
             .context("写入系统剪贴板失败")
+    }
+
+    /// 写回剪贴板并直接粘贴到 `target` 窗口；`target` 为空时退化为仅复制。
+    ///
+    /// 调用方需已隐藏自身窗口，否则焦点还原会与窗口显隐竞争。
+    pub fn paste_to(&self, id: i64, target: Option<isize>) -> Result<()> {
+        self.copy_to_clipboard(id)?;
+        if let Some(target) = target {
+            paste::paste_into(target);
+        }
+        Ok(())
     }
 
     pub fn toggle_pin(&self, id: i64) -> Result<()> {

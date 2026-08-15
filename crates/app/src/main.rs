@@ -41,6 +41,11 @@ pub(crate) struct WakeHotkey(pub &'static str);
 
 impl Global for WakeHotkey {}
 
+/// 唤起 Wisp 之前的前台窗口，粘贴时把焦点还给它
+struct LastForeground(Option<isize>);
+
+impl Global for LastForeground {}
+
 /// 主视图句柄，供事件泵在剪贴板变更时触发刷新
 struct MainView(Entity<ClipboardView>);
 
@@ -81,6 +86,11 @@ pub(crate) fn hide_main_window(cx: &App) {
     if let Some(native) = cx.try_global::<NativeWindow>() {
         hide_native(native.0);
     }
+}
+
+/// 唤起前记录的前台窗口，供粘贴时还原焦点
+pub(crate) fn paste_target(cx: &App) -> Option<isize> {
+    cx.try_global::<LastForeground>().and_then(|last| last.0)
 }
 
 // ==================== 托盘 ====================
@@ -242,6 +252,10 @@ fn main() {
                             if toggle && is_native_visible(raw) {
                                 hide_native(raw);
                             } else {
+                                // 必须在自己抢到前台之前记录，否则记到的就是 Wisp 自己
+                                cx.set_global(LastForeground(wisp_core::capture_foreground(Some(
+                                    raw,
+                                ))));
                                 show_native(raw);
                                 for window in cx.windows() {
                                     _ = window.update(cx, |_, window, _| window.activate_window());

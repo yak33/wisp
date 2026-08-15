@@ -4,9 +4,11 @@
 //! [`ClipboardService`] 与 [`Clip`] 两个入口类型。
 
 mod clip;
+mod paste;
 mod service;
 mod store;
 mod watcher;
 
 pub use clip::{Clip, ClipKind};
+pub use paste::capture_foreground;
 pub use service::ClipboardService;

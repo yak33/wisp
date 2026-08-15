@@ -17,7 +17,7 @@ use gpui_component::{
 };
 use wisp_core::{Clip, ClipboardService};
 
-use crate::{WakeHotkey, hide_main_window};
+use crate::{WakeHotkey, hide_main_window, paste_target};
 
 const ROW_HEIGHT: Pixels = px(40.);
 const QUERY_LIMIT: usize = 500;
@@ -46,7 +46,10 @@ impl ClipboardView {
                         this.keyword = state.read(cx).value().to_string();
                         this.reload(cx);
                     }
-                    InputEvent::PressEnter { .. } => this.copy_selected(cx),
+                    InputEvent::PressEnter { secondary, .. } => {
+                        // Ctrl+Enter 只回填剪贴板，留给用户自己决定粘到哪
+                        this.deliver_selected(!secondary, cx)
+                    }
                     _ => {}
                 }
             }),
@@ -87,13 +90,18 @@ impl ClipboardView {
         cx.notify();
     }
 
-    fn copy_selected(&mut self, cx: &mut Context<Self>) {
+    /// 交付选中项：`paste` 为真时直接粘贴到唤起前的窗口，否则仅回填剪贴板。
+    ///
+    /// 两种情形都先隐藏窗口——粘贴链路依赖 Wisp 让出前台。
+    fn deliver_selected(&mut self, paste: bool, cx: &mut Context<Self>) {
         let Some(clip) = self.items.get(self.selected) else {
             return;
         };
-        if self.service.copy_to_clipboard(clip.id).is_ok() {
-            hide_main_window(cx);
-        }
+        let id = clip.id;
+        let target = paste.then(|| paste_target(cx)).flatten();
+
+        hide_main_window(cx);
+        _ = self.service.paste_to(id, target);
     }
 
     fn move_selection(&mut self, delta: i64, cx: &mut Context<Self>) {
@@ -223,7 +231,7 @@ impl Render for ClipboardView {
                     .justify_between()
                     .child(format!("{} 条记录", self.items.len()))
                     .child(format!(
-                        "{hotkey} 显隐 · ↑↓ 选择 · 回车复制 · Ctrl+P 置顶 · Esc 隐藏"
+                        "{hotkey} 显隐 · ↑↓ 选择 · 回车粘贴 · Ctrl+回车仅复制 · Ctrl+P 置顶"
                     )),
             )
             .child(
@@ -247,7 +255,7 @@ impl Render for ClipboardView {
                                                 let row = this.render_row(ix, cx).id(ix).on_click(
                                                     cx.listener(move |this, _, _, cx| {
                                                         this.selected = ix;
-                                                        this.copy_selected(cx);
+                                                        this.deliver_selected(true, cx);
                                                     }),
                                                 );
                                                 Some(row)
