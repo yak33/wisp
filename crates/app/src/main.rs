@@ -4,6 +4,8 @@
 //! Esc 或失焦隐藏；托盘双击唤起，右键菜单退出。
 
 mod clipboard_view;
+mod memo_view;
+mod wisp_view;
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
@@ -23,9 +25,9 @@ use windows::Win32::{
     Foundation::HWND,
     UI::WindowsAndMessaging::{IsWindowVisible, SetForegroundWindow, ShowWindow, SW_HIDE, SW_SHOW},
 };
-use wisp_core::ClipboardService;
+use wisp_core::{ClipboardService, MemoService};
 
-use crate::clipboard_view::ClipboardView;
+use crate::wisp_view::WispView;
 
 const WINDOW_SIZE: Size<Pixels> = size(px(720.), px(520.));
 
@@ -47,7 +49,7 @@ struct LastForeground(Option<isize>);
 impl Global for LastForeground {}
 
 /// 主视图句柄，供事件泵在剪贴板变更时触发刷新
-struct MainView(Entity<ClipboardView>);
+struct MainView(Entity<WispView>);
 
 impl Global for MainView {}
 
@@ -134,9 +136,11 @@ fn main() {
 
         // 剪贴板服务：监听/入库在 core 的独立线程，变更信号进壳层事件泵
         let (changed_tx, changed_rx) = crossbeam_channel::unbounded::<()>();
-        let service = Arc::new(
-            ClipboardService::start(&db_path(), changed_tx).expect("启动剪贴板服务失败"),
+        let db_path = db_path();
+        let clipboard_service = Arc::new(
+            ClipboardService::start(&db_path, changed_tx).expect("启动剪贴板服务失败"),
         );
+        let memo_service = Arc::new(MemoService::open(&db_path).expect("打开备忘库失败"));
 
         // Alt+Space 大概率被 uTools 等工具占用，按候选顺序降级注册
         let hotkeys = GlobalHotKeyManager::new().expect("初始化全局快捷键失败");
@@ -192,7 +196,14 @@ fn main() {
                         cx.set_global(NativeWindow(win32.hwnd.get()));
                     }
                 }
-                let view = cx.new(|cx| ClipboardView::new(Arc::clone(&service), window, cx));
+                let view = cx.new(|cx| {
+                    WispView::new(
+                        Arc::clone(&clipboard_service),
+                        Arc::clone(&memo_service),
+                        window,
+                        cx,
+                    )
+                });
                 cx.set_global(MainView(view.clone()));
                 cx.new(|cx| Root::new(view, window, cx))
             })
@@ -240,7 +251,7 @@ fn main() {
                         if clips_changed {
                             if let Some(main) = cx.try_global::<MainView>() {
                                 let view = main.0.clone();
-                                view.update(cx, |view, cx| view.reload(cx));
+                                view.update(cx, |view, cx| view.reload_clips(cx));
                             }
                         }
 

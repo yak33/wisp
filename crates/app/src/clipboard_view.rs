@@ -1,4 +1,4 @@
-//! 剪贴板历史视图：搜索、键盘导航、回车/点击复制。
+//! 剪贴板历史视图：搜索、键盘导航、回车直达粘贴。
 
 use std::{
     rc::Rc,
@@ -8,8 +8,7 @@ use std::{
 
 use gpui::{prelude::FluentBuilder as _, *};
 use gpui_component::{
-    ActiveTheme as _, StyledExt as _, VirtualListScrollHandle,
-    checkbox::Checkbox,
+    ActiveTheme as _, VirtualListScrollHandle,
     h_flex,
     input::{Input, InputEvent, InputState},
     scroll::{ScrollableElement as _, ScrollbarAxis},
@@ -17,9 +16,10 @@ use gpui_component::{
 };
 use wisp_core::{Clip, ClipboardService};
 
-use crate::{WakeHotkey, hide_main_window, paste_target};
+use crate::{hide_main_window, paste_target};
 
 const ROW_HEIGHT: Pixels = px(40.);
+const ROW_WIDTH: Pixels = px(700.);
 const QUERY_LIMIT: usize = 500;
 
 pub(crate) struct ClipboardView {
@@ -30,41 +30,27 @@ pub(crate) struct ClipboardView {
     item_sizes: Rc<Vec<Size<Pixels>>>,
     selected: usize,
     scroll_handle: VirtualListScrollHandle,
-    auto_hide: bool,
     _subscriptions: Vec<Subscription>,
 }
 
 impl ClipboardView {
     pub fn new(service: Arc<ClipboardService>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let input_state =
-            cx.new(|cx| InputState::new(window, cx).placeholder("搜索剪贴板历史，回车复制选中项…"));
+            cx.new(|cx| InputState::new(window, cx).placeholder("搜索剪贴板历史，回车粘贴选中项…"));
 
-        let _subscriptions = vec![
-            cx.subscribe_in(&input_state, window, |this: &mut Self, state, ev, _, cx| {
-                match ev {
-                    InputEvent::Change => {
-                        this.keyword = state.read(cx).value().to_string();
-                        this.reload(cx);
-                    }
-                    InputEvent::PressEnter { secondary, .. } => {
-                        // Ctrl+Enter 只回填剪贴板，留给用户自己决定粘到哪
-                        this.deliver_selected(!secondary, cx)
-                    }
-                    _ => {}
-                }
-            }),
-            // 唤起即聚焦可打字，同时补一次查询（窗口隐藏期间的变更不会丢）；
-            // 失焦（且开关打开）自动隐藏
-            cx.observe_window_activation(window, |this: &mut Self, window, cx| {
-                if window.is_window_active() {
-                    this.input_state
-                        .update(cx, |state, cx| state.focus(window, cx));
+        let _subscriptions = vec![cx.subscribe_in(
+            &input_state,
+            window,
+            |this: &mut Self, state, ev, _, cx| match ev {
+                InputEvent::Change => {
+                    this.keyword = state.read(cx).value().to_string();
                     this.reload(cx);
-                } else if this.auto_hide {
-                    hide_main_window(cx);
                 }
-            }),
-        ];
+                // Ctrl+Enter 只回填剪贴板，留给用户自己决定粘到哪
+                InputEvent::PressEnter { secondary, .. } => this.deliver_selected(!secondary, cx),
+                _ => {}
+            },
+        )];
 
         let mut view = Self {
             service,
@@ -74,17 +60,21 @@ impl ClipboardView {
             item_sizes: Rc::new(Vec::new()),
             selected: 0,
             scroll_handle: VirtualListScrollHandle::new(),
-            auto_hide: true,
             _subscriptions,
         };
         view.reload(cx);
         view
     }
 
+    pub fn focus_search(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.input_state
+            .update(cx, |state, cx| state.focus(window, cx));
+    }
+
     /// 以当前关键字重查列表。新内容置顶，故刷新后选中项归位到首条。
     pub fn reload(&mut self, cx: &mut Context<Self>) {
         self.items = self.service.query(&self.keyword, QUERY_LIMIT);
-        self.item_sizes = Rc::new(vec![size(WINDOW_SIZE_HINT, ROW_HEIGHT); self.items.len()]);
+        self.item_sizes = Rc::new(vec![size(ROW_WIDTH, ROW_HEIGHT); self.items.len()]);
         self.selected = 0;
         self.scroll_handle.scroll_to_item(0, ScrollStrategy::Top);
         cx.notify();
@@ -184,16 +174,10 @@ impl ClipboardView {
     }
 }
 
-const WINDOW_SIZE_HINT: Pixels = px(720.);
-
 impl Render for ClipboardView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let hotkey = cx.try_global::<WakeHotkey>().map_or("快捷键", |k| k.0);
-
         v_flex()
             .size_full()
-            .bg(cx.theme().background)
-            .text_color(cx.theme().foreground)
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
                 match ev.keystroke.key.as_str() {
                     "escape" => hide_main_window(cx),
@@ -203,36 +187,16 @@ impl Render for ClipboardView {
                     _ => {}
                 }
             }))
+            .child(div().px_3().pt_2().pb_1().child(Input::new(&self.input_state)))
             .child(
                 h_flex()
-                    .px_4()
-                    .pt_3()
-                    .pb_1()
-                    .items_center()
-                    .justify_between()
-                    .child(div().font_semibold().child("Wisp · 剪贴板"))
-                    .child(
-                        Checkbox::new("auto-hide")
-                            .checked(self.auto_hide)
-                            .label("失焦自动隐藏")
-                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                                this.auto_hide = *checked;
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .child(div().px_4().py_2().child(Input::new(&self.input_state)))
-            .child(
-                h_flex()
-                    .px_4()
+                    .px_3()
                     .pb_1()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .justify_between()
                     .child(format!("{} 条记录", self.items.len()))
-                    .child(format!(
-                        "{hotkey} 显隐 · ↑↓ 选择 · 回车粘贴 · Ctrl+回车仅复制 · Ctrl+P 置顶"
-                    )),
+                    .child("↑↓ 选择 · 回车粘贴 · Ctrl+回车仅复制 · Ctrl+P 置顶"),
             )
             .child(
                 div().flex_1().min_h_0().child(
@@ -252,13 +216,12 @@ impl Render for ClipboardView {
                                                 if ix >= this.items.len() {
                                                     return None;
                                                 }
-                                                let row = this.render_row(ix, cx).id(ix).on_click(
+                                                Some(this.render_row(ix, cx).id(ix).on_click(
                                                     cx.listener(move |this, _, _, cx| {
                                                         this.selected = ix;
                                                         this.deliver_selected(true, cx);
                                                     }),
-                                                );
-                                                Some(row)
+                                                ))
                                             })
                                             .collect()
                                     },
