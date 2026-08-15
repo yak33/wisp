@@ -1,27 +1,63 @@
-//! 应用根视图：标签页切换与窗口级行为（聚焦、失焦隐藏）。
+//! 应用根视图：主页 / 功能页导航与窗口级行为（聚焦、失焦隐藏、标题拖动）。
 //!
-//! 焦点与显隐这类窗口级关注点集中在此处，子视图只负责各自的内容，
-//! 避免多个子视图同时抢焦点。
+//! 焦点、显隐、页面切换这类窗口级关注点集中在此处，子视图只负责各自的
+//! 内容，避免多个子视图并存时互相抢焦点。
 
 use std::sync::Arc;
 
 use gpui::{prelude::FluentBuilder as _, *};
 use gpui_component::{
-    ActiveTheme as _, StyledExt as _,
+    ActiveTheme as _, IconName, Sizable as _, StyledExt as _,
+    button::{Button, ButtonVariants as _},
     checkbox::Checkbox,
-    h_flex,
-    tab::{Tab, TabBar},
-    v_flex,
+    h_flex, v_flex,
 };
 use wisp_core::{ClipboardService, MemoService};
 
-use crate::{WakeHotkey, clipboard_view::ClipboardView, hide_main_window, memo_view::MemoView};
+use crate::{
+    WakeHotkey, clipboard_view::ClipboardView, config::Config, hide_main_window,
+    home_view::{HomeView, OpenFeature}, memo_view::MemoView,
+};
 
-const TAB_CLIPBOARD: usize = 0;
-const TAB_MEMO: usize = 1;
+/// 一级页面。上次所在页面会持久化，重启后原样恢复。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Page {
+    Home,
+    Clipboard,
+    Memo,
+}
+
+impl Page {
+    fn title(self) -> &'static str {
+        match self {
+            Self::Home => "Wisp",
+            Self::Clipboard => "剪贴板",
+            Self::Memo => "备忘快贴",
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            Self::Home => "home",
+            Self::Clipboard => "clipboard",
+            Self::Memo => "memo",
+        }
+    }
+
+    fn from_key(key: &str) -> Option<Self> {
+        match key {
+            "home" => Some(Self::Home),
+            "clipboard" => Some(Self::Clipboard),
+            "memo" => Some(Self::Memo),
+            _ => None,
+        }
+    }
+}
 
 pub(crate) struct WispView {
-    tab_ix: usize,
+    page: Page,
+    config: Config,
+    home: Entity<HomeView>,
     clipboard: Entity<ClipboardView>,
     memos: Entity<MemoView>,
     auto_hide: bool,
@@ -32,23 +68,40 @@ impl WispView {
     pub fn new(
         clipboard_service: Arc<ClipboardService>,
         memo_service: Arc<MemoService>,
+        config: Config,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let home = cx.new(|cx| HomeView::new(window, cx));
         let clipboard = cx.new(|cx| ClipboardView::new(clipboard_service, window, cx));
         let memos = cx.new(|cx| MemoView::new(memo_service, window, cx));
 
-        let _subscriptions = vec![cx.observe_window_activation(window, |this: &mut Self, window, cx| {
-            if window.is_window_active() {
-                this.focus_active_tab(window, cx);
-                this.reload_active_tab(cx);
-            } else if this.auto_hide {
-                hide_main_window(cx);
-            }
-        })];
+        let _subscriptions = vec![
+            cx.observe_window_activation(
+                window,
+                |this: &mut Self, window, cx| {
+                    if window.is_window_active() {
+                        this.focus_active_page(window, cx);
+                        this.reload_active_page(cx);
+                    } else if this.auto_hide {
+                        hide_main_window(cx);
+                    }
+                },
+            ),
+            cx.subscribe_in(&home, window, |this: &mut Self, _, event, window, cx| {
+                let page = match event {
+                    OpenFeature::Clipboard => Page::Clipboard,
+                    OpenFeature::Memo => Page::Memo,
+                };
+                this.open_page(page, window, cx);
+            }),
+        ];
 
+        let page = config.get("last_page").and_then(Page::from_key);
         Self {
-            tab_ix: TAB_CLIPBOARD,
+            page: page.unwrap_or(Page::Home),
+            config,
+            home,
             clipboard,
             memos,
             auto_hide: true,
@@ -56,35 +109,40 @@ impl WispView {
         }
     }
 
-    /// 剪贴板有新内容时刷新——仅在该标签页可见时才有意义。
+    /// 剪贴板有新内容时刷新——仅在该页可见时才有意义。
     pub fn reload_clips(&self, cx: &mut Context<Self>) {
-        if self.tab_ix == TAB_CLIPBOARD {
+        if self.page == Page::Clipboard {
             self.clipboard.update(cx, |view, cx| view.reload(cx));
         }
     }
 
-    fn reload_active_tab(&self, cx: &mut Context<Self>) {
-        match self.tab_ix {
-            TAB_MEMO => self.memos.update(cx, |view, cx| view.reload(cx)),
-            _ => self.clipboard.update(cx, |view, cx| view.reload(cx)),
+    fn reload_active_page(&self, cx: &mut Context<Self>) {
+        match self.page {
+            Page::Home => self.home.update(cx, |view, cx| view.reload(cx)),
+            Page::Clipboard => self.clipboard.update(cx, |view, cx| view.reload(cx)),
+            Page::Memo => self.memos.update(cx, |view, cx| view.reload(cx)),
         }
     }
 
-    fn focus_active_tab(&self, window: &mut Window, cx: &mut Context<Self>) {
-        match self.tab_ix {
-            TAB_MEMO => self
-                .memos
+    fn focus_active_page(&self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.page {
+            Page::Home => self
+                .home
                 .update(cx, |view, cx| view.focus_search(window, cx)),
-            _ => self
+            Page::Clipboard => self
                 .clipboard
                 .update(cx, |view, cx| view.focus_search(window, cx)),
+            Page::Memo => self
+                .memos
+                .update(cx, |view, cx| view.focus_search(window, cx)),
         }
     }
 
-    fn select_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        self.tab_ix = ix;
-        self.reload_active_tab(cx);
-        self.focus_active_tab(window, cx);
+    fn open_page(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
+        self.page = page;
+        self.config.set("last_page", page.key());
+        self.reload_active_page(cx);
+        self.focus_active_page(window, cx);
         cx.notify();
     }
 }
@@ -100,58 +158,81 @@ impl Render for WispView {
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
                 if ev.keystroke.modifiers.control {
                     match ev.keystroke.key.as_str() {
-                        "1" => this.select_tab(TAB_CLIPBOARD, window, cx),
-                        "2" => this.select_tab(TAB_MEMO, window, cx),
+                        "1" => this.open_page(Page::Clipboard, window, cx),
+                        "2" => this.open_page(Page::Memo, window, cx),
                         _ => {}
+                    }
+                    return;
+                }
+                // Esc 逐层外退：功能页回主页，主页才隐藏窗口
+                if ev.keystroke.key == "escape" {
+                    match this.page {
+                        Page::Home => hide_main_window(cx),
+                        _ => this.open_page(Page::Home, window, cx),
                     }
                 }
             }))
             .child(
+                // 整个头部标记为窗口拖动区：WM_NCHITTEST 对该区域返回 HTCAPTION，Windows 原生接管移动。
+                // 命中链默认会穿透 Normal 行为的子元素 hitbox，可点击的子元素必须 .occlude()
+                // 截断命中链，否则点击被当成标题栏拖拽吞掉（Zed 的标题栏子元素同样如此处理）
                 h_flex()
                     .px_4()
                     .pt_3()
                     .items_center()
                     .justify_between()
+                    .window_control_area(WindowControlArea::Drag)
                     .child(
                         h_flex()
                             .gap_2()
-                            .items_baseline()
-                            .child(div().font_semibold().child("Wisp"))
+                            .items_center()
+                            .when(self.page != Page::Home, |header| {
+                                header.child(
+                                    h_flex().occlude().child(
+                                        Button::new("back-home")
+                                            .ghost()
+                                            .xsmall()
+                                            .icon(IconName::ChevronLeft)
+                                            .label("主页")
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.open_page(Page::Home, window, cx)
+                                            })),
+                                    ),
+                                )
+                            })
                             .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(format!("{hotkey} 显隐")),
+                                h_flex()
+                                    .gap_2()
+                                    .items_baseline()
+                                    .child(div().font_semibold().child(self.page.title()))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(format!("{hotkey} 显隐 · 按住此处拖动")),
+                                    ),
                             ),
                     )
                     .child(
-                        Checkbox::new("auto-hide")
-                            .checked(self.auto_hide)
-                            .label("失焦自动隐藏")
-                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                                this.auto_hide = *checked;
-                                cx.notify();
-                            })),
+                        h_flex().occlude().child(
+                            Checkbox::new("auto-hide")
+                                .checked(self.auto_hide)
+                                .label("失焦自动隐藏")
+                                .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                    this.auto_hide = *checked;
+                                    cx.notify();
+                                })),
+                        ),
                     ),
-            )
-            .child(
-                div().px_2().pt_2().child(
-                    TabBar::new("wisp-tabs")
-                        .selected_index(self.tab_ix)
-                        .on_click(cx.listener(|this, ix: &usize, window, cx| {
-                            this.select_tab(*ix, window, cx);
-                        }))
-                        .child(Tab::new().label("剪贴板"))
-                        .child(Tab::new().label("备忘快贴")),
-                ),
             )
             .child(
                 div()
                     .flex_1()
                     .min_h_0()
-                    .map(|body| match self.tab_ix {
-                        TAB_MEMO => body.child(self.memos.clone()),
-                        _ => body.child(self.clipboard.clone()),
+                    .map(|body| match self.page {
+                        Page::Home => body.child(self.home.clone()),
+                        Page::Clipboard => body.child(self.clipboard.clone()),
+                        Page::Memo => body.child(self.memos.clone()),
                     }),
             )
     }

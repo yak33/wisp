@@ -10,9 +10,9 @@ use std::{
 };
 
 use anyhow::{Context as _, Result};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, params, params_from_iter};
 
-use crate::clip::{Clip, ClipKind, fingerprint, make_preview};
+use crate::clip::{Clip, ClipFilter, ClipKind, fingerprint, make_preview};
 
 pub(crate) struct ClipStore {
     conn: Mutex<Connection>,
@@ -72,25 +72,39 @@ impl ClipStore {
         Ok(())
     }
 
-    /// 检索：空关键字返回最近记录，否则按内容模糊匹配；置顶项恒排最前。
-    pub fn query(&self, keyword: &str, limit: usize) -> Result<Vec<Clip>> {
+    /// 检索：分类与关键字可叠加；空关键字返回该分类下最近记录，置顶项恒排最前。
+    pub fn query(&self, filter: ClipFilter, keyword: &str, limit: usize) -> Result<Vec<Clip>> {
         let conn = self.conn.lock().expect("clip store poisoned");
         let keyword = keyword.trim();
 
-        let (sql, pattern);
-        if keyword.is_empty() {
-            sql = "SELECT id, kind, content, preview, pinned, created_at FROM clips
-                   ORDER BY pinned DESC, created_at DESC LIMIT ?1";
-            pattern = String::new();
-        } else {
-            sql = "SELECT id, kind, content, preview, pinned, created_at FROM clips
-                   WHERE content LIKE ?2 ESCAPE '\\'
-                   ORDER BY pinned DESC, created_at DESC LIMIT ?1";
-            pattern = format!("%{}%", escape_like(keyword));
-        }
+        let mut sql = String::from(
+            "SELECT id, kind, content, preview, pinned, created_at FROM clips WHERE 1 = 1",
+        );
+        let mut args: Vec<String> = Vec::new();
 
-        let mut stmt = conn.prepare_cached(sql)?;
-        let map_row = |row: &rusqlite::Row<'_>| {
+        let kind = match filter {
+            ClipFilter::All => None,
+            ClipFilter::Text => Some(ClipKind::Text),
+            ClipFilter::Image => Some(ClipKind::Image),
+            ClipFilter::Files => Some(ClipKind::Files),
+            ClipFilter::Pinned => {
+                sql.push_str(" AND pinned = 1");
+                None
+            }
+        };
+        if let Some(kind) = kind {
+            sql.push_str(" AND kind = ?");
+            args.push((kind as i64).to_string());
+        }
+        if !keyword.is_empty() {
+            sql.push_str(" AND content LIKE ? ESCAPE '\\'");
+            args.push(format!("%{}%", escape_like(keyword)));
+        }
+        sql.push_str(" ORDER BY pinned DESC, created_at DESC LIMIT ?");
+        args.push(limit.to_string());
+
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(args.iter()), |row| {
             let content: String = row.get(2)?;
             Ok(Clip {
                 id: row.get(0)?,
@@ -101,13 +115,7 @@ impl ClipStore {
                 pinned: row.get::<_, i64>(4)? != 0,
                 created_at: row.get(5)?,
             })
-        };
-
-        let rows = if keyword.is_empty() {
-            stmt.query_map(params![limit as i64], map_row)?
-        } else {
-            stmt.query_map(params![limit as i64, pattern], map_row)?
-        };
+        })?;
 
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
@@ -174,7 +182,7 @@ mod tests {
         store.insert_text("第二条").unwrap();
         store.insert_text("第一条").unwrap();
 
-        let clips = store.query("", 10).unwrap();
+        let clips = store.query(ClipFilter::All, "", 10).unwrap();
         assert_eq!(clips.len(), 2);
         assert_eq!(clips[0].content, "第一条");
     }
@@ -185,7 +193,7 @@ mod tests {
         store.insert_text("进度 100%").unwrap();
         store.insert_text("进度未知").unwrap();
 
-        let clips = store.query("100%", 10).unwrap();
+        let clips = store.query(ClipFilter::All, "100%", 10).unwrap();
         assert_eq!(clips.len(), 1);
         assert_eq!(clips[0].content, "进度 100%");
     }
@@ -197,10 +205,33 @@ mod tests {
         store.insert_text("置顶").unwrap();
         store.insert_text("最新").unwrap();
 
-        let pinned_id = store.query("置顶", 1).unwrap()[0].id;
+        let pinned_id = store.query(ClipFilter::All, "置顶", 1).unwrap()[0].id;
         store.toggle_pin(pinned_id).unwrap();
 
-        let clips = store.query("", 10).unwrap();
+        let clips = store.query(ClipFilter::All, "", 10).unwrap();
         assert_eq!(clips[0].content, "置顶");
+    }
+
+    #[test]
+    fn filter_by_pinned_and_kind() {
+        let store = memory_store();
+        store.insert_text("普通文本").unwrap();
+        store.insert_text("收藏文本").unwrap();
+
+        let pinned_id = store.query(ClipFilter::All, "收藏", 1).unwrap()[0].id;
+        store.toggle_pin(pinned_id).unwrap();
+
+        // 收藏分类只含置顶项，且可与关键字叠加
+        let pinned = store.query(ClipFilter::Pinned, "", 10).unwrap();
+        assert_eq!(pinned.len(), 1);
+        assert_eq!(pinned[0].content, "收藏文本");
+
+        let hit = store.query(ClipFilter::Pinned, "收藏", 10).unwrap();
+        assert_eq!(hit.len(), 1);
+        assert!(store.query(ClipFilter::Pinned, "普通", 10).unwrap().is_empty());
+
+        // 文本分类命中全部文本条目；图像分类暂为空（M3 落地后自动出现）
+        assert_eq!(store.query(ClipFilter::Text, "", 10).unwrap().len(), 2);
+        assert!(store.query(ClipFilter::Image, "", 10).unwrap().is_empty());
     }
 }

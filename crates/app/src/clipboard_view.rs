@@ -14,7 +14,7 @@ use gpui_component::{
     scroll::{ScrollableElement as _, ScrollbarAxis},
     v_flex, v_virtual_list,
 };
-use wisp_core::{Clip, ClipboardService};
+use wisp_core::{Clip, ClipFilter, ClipboardService};
 
 use crate::{hide_main_window, paste_target};
 
@@ -26,6 +26,7 @@ pub(crate) struct ClipboardView {
     service: Arc<ClipboardService>,
     input_state: Entity<InputState>,
     keyword: String,
+    filter: ClipFilter,
     items: Vec<Clip>,
     item_sizes: Rc<Vec<Size<Pixels>>>,
     selected: usize,
@@ -56,6 +57,7 @@ impl ClipboardView {
             service,
             input_state,
             keyword: String::new(),
+            filter: ClipFilter::All,
             items: Vec::new(),
             item_sizes: Rc::new(Vec::new()),
             selected: 0,
@@ -71,13 +73,18 @@ impl ClipboardView {
             .update(cx, |state, cx| state.focus(window, cx));
     }
 
-    /// 以当前关键字重查列表。新内容置顶，故刷新后选中项归位到首条。
+    /// 以当前分类与关键字重查列表。新内容置顶，故刷新后选中项归位到首条。
     pub fn reload(&mut self, cx: &mut Context<Self>) {
-        self.items = self.service.query(&self.keyword, QUERY_LIMIT);
+        self.items = self.service.query(self.filter, &self.keyword, QUERY_LIMIT);
         self.item_sizes = Rc::new(vec![size(ROW_WIDTH, ROW_HEIGHT); self.items.len()]);
         self.selected = 0;
         self.scroll_handle.scroll_to_item(0, ScrollStrategy::Top);
         cx.notify();
+    }
+
+    fn set_filter(&mut self, filter: ClipFilter, cx: &mut Context<Self>) {
+        self.filter = filter;
+        self.reload(cx);
     }
 
     /// 交付选中项：`paste` 为真时直接粘贴到唤起前的窗口，否则仅回填剪贴板。
@@ -172,6 +179,31 @@ impl ClipboardView {
                     .child(relative_time(clip.created_at)),
             )
     }
+
+    /// 分类标签行：全部 / 文本 / 图像 / 文件 / 收藏（Alt+1~5 等效）
+    fn render_filter_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        h_flex()
+            .px_3()
+            .pb_1()
+            .gap_1()
+            .children(ClipFilter::ALL.iter().enumerate().map(|(ix, filter)| {
+                let active = *filter == self.filter;
+                div()
+                    .id(("clip-filter", ix))
+                    .px_2()
+                    .py_0p5()
+                    .rounded_sm()
+                    .text_xs()
+                    .cursor_pointer()
+                    .when(active, |chip| chip.bg(cx.theme().accent))
+                    .when(!active, |chip| {
+                        chip.text_color(cx.theme().muted_foreground)
+                            .hover(|style| style.bg(cx.theme().accent.opacity(0.3)))
+                    })
+                    .child(filter.label())
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_filter(*filter, cx)))
+            }))
+    }
 }
 
 impl Render for ClipboardView {
@@ -180,14 +212,20 @@ impl Render for ClipboardView {
             .size_full()
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
                 match ev.keystroke.key.as_str() {
-                    "escape" => hide_main_window(cx),
+                    // Esc 不在此消费，冒泡到根视图统一处理（回主页 / 隐藏窗口）
                     "up" => this.move_selection(-1, cx),
                     "down" => this.move_selection(1, cx),
                     "p" if ev.keystroke.modifiers.control => this.toggle_pin_selected(cx),
+                    key if ev.keystroke.modifiers.alt => {
+                        if let Some(n) = key.parse::<usize>().ok().filter(|n| (1..=5).contains(n)) {
+                            this.set_filter(ClipFilter::ALL[n - 1], cx);
+                        }
+                    }
                     _ => {}
                 }
             }))
             .child(div().px_3().pt_2().pb_1().child(Input::new(&self.input_state)))
+            .child(self.render_filter_bar(cx))
             .child(
                 h_flex()
                     .px_3()
@@ -196,41 +234,59 @@ impl Render for ClipboardView {
                     .text_color(cx.theme().muted_foreground)
                     .justify_between()
                     .child(format!("{} 条记录", self.items.len()))
-                    .child("↑↓ 选择 · 回车粘贴 · Ctrl+回车仅复制 · Ctrl+P 置顶"),
+                    .child("↑↓ 选择 · 回车粘贴 · Alt+1~5 分类 · Ctrl+P 置顶"),
             )
             .child(
-                div().flex_1().min_h_0().child(
-                    div().relative().size_full().child(
-                        v_flex()
-                            .id("clip-list")
-                            .relative()
-                            .size_full()
-                            .child(
-                                v_virtual_list(
-                                    cx.entity().clone(),
-                                    "clip-items",
-                                    self.item_sizes.clone(),
-                                    |this, visible_range, _, cx| {
-                                        visible_range
-                                            .filter_map(|ix| {
-                                                if ix >= this.items.len() {
-                                                    return None;
-                                                }
-                                                Some(this.render_row(ix, cx).id(ix).on_click(
-                                                    cx.listener(move |this, _, _, cx| {
-                                                        this.selected = ix;
-                                                        this.deliver_selected(true, cx);
-                                                    }),
-                                                ))
-                                            })
-                                            .collect()
-                                    },
-                                )
-                                .track_scroll(&self.scroll_handle),
-                            )
-                            .scrollbar(&self.scroll_handle, ScrollbarAxis::Vertical),
-                    ),
-                ),
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .when(self.items.is_empty(), |body| {
+                        body.child(
+                            div()
+                                .p_6()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(match self.filter {
+                                    ClipFilter::Image => "图像剪贴板尚未支持（M3 规划中）",
+                                    ClipFilter::Files => "文件剪贴板尚未支持（M3 规划中）",
+                                    _ => "没有匹配的记录",
+                                }),
+                        )
+                    })
+                    .when(!self.items.is_empty(), |body| {
+                        body.child(
+                            div().relative().size_full().child(
+                                v_flex()
+                                    .id("clip-list")
+                                    .relative()
+                                    .size_full()
+                                    .child(
+                                        v_virtual_list(
+                                            cx.entity().clone(),
+                                            "clip-items",
+                                            self.item_sizes.clone(),
+                                            |this, visible_range, _, cx| {
+                                                visible_range
+                                                    .filter_map(|ix| {
+                                                        if ix >= this.items.len() {
+                                                            return None;
+                                                        }
+                                                        Some(this.render_row(ix, cx).id(ix).on_click(
+                                                            cx.listener(move |this, _, _, cx| {
+                                                                this.selected = ix;
+                                                                this.deliver_selected(true, cx);
+                                                            }),
+                                                        ))
+                                                    })
+                                                    .collect()
+                                            },
+                                        )
+                                        .track_scroll(&self.scroll_handle),
+                                    )
+                                    .scrollbar(&self.scroll_handle, ScrollbarAxis::Vertical),
+                            ),
+                        )
+                    }),
             )
     }
 }

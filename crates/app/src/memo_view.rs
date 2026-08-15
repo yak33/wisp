@@ -456,8 +456,12 @@ impl Render for MemoView {
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
                 let ctrl = ev.keystroke.modifiers.control;
                 match ev.keystroke.key.as_str() {
-                    "escape" if this.is_editing() => this.close_editor(window, cx),
-                    "escape" => hide_main_window(cx),
+                    // 编辑态的 Esc 是"取消编辑"，消费掉不再外冒；
+                    // 列表态不处理 Esc，冒泡到根视图统一处理（回主页）
+                    "escape" if this.is_editing() => {
+                        this.close_editor(window, cx);
+                        cx.stop_propagation();
+                    }
                     "s" if ctrl && this.is_editing() => this.save_editor(window, cx),
                     // 列表态才响应导航与增删，编辑态的方向键属于文本框
                     _ if this.is_editing() => {}

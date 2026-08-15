@@ -12,7 +12,7 @@ mod service;
 mod store;
 mod watcher;
 
-pub use clip::{Clip, ClipKind};
+pub use clip::{Clip, ClipFilter, ClipKind};
 pub use memo::{Memo, MemoDraft, TagFilter, TagSummary, parse_tags};
 pub use memo_service::MemoService;
 pub use paste::capture_foreground;

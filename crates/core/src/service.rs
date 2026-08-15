@@ -10,7 +10,12 @@ use std::{path::Path, sync::Arc, thread, time::Duration};
 use anyhow::{Context as _, Result};
 use crossbeam_channel::Sender;
 
-use crate::{clip::Clip, paste, store::ClipStore, watcher};
+use crate::{
+    clip::{Clip, ClipFilter},
+    paste,
+    store::ClipStore,
+    watcher,
+};
 
 /// 超过该体量的文本不进历史（防止异常复制撑爆列表与磁盘）
 const MAX_TEXT_BYTES: usize = 2 * 1024 * 1024;
@@ -58,9 +63,9 @@ impl ClipboardService {
         })
     }
 
-    /// 空关键字返回最近记录；否则模糊检索。置顶项恒在最前。
-    pub fn query(&self, keyword: &str, limit: usize) -> Vec<Clip> {
-        self.store.query(keyword, limit).unwrap_or_default()
+    /// 按分类与关键字检索。空关键字返回该分类下最近记录；置顶项恒在最前。
+    pub fn query(&self, filter: ClipFilter, keyword: &str, limit: usize) -> Vec<Clip> {
+        self.store.query(filter, keyword, limit).unwrap_or_default()
     }
 
     /// 将指定条目写回系统剪贴板（触发监听回环，该条自动置顶）。

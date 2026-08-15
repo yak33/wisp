@@ -4,6 +4,8 @@
 //! Esc 或失焦隐藏；托盘双击唤起，右键菜单退出。
 
 mod clipboard_view;
+mod config;
+mod home_view;
 mod memo_view;
 mod wisp_view;
 
@@ -27,7 +29,7 @@ use windows::Win32::{
 };
 use wisp_core::{ClipboardService, MemoService};
 
-use crate::wisp_view::WispView;
+use crate::{config::Config, wisp_view::WispView};
 
 const WINDOW_SIZE: Size<Pixels> = size(px(720.), px(520.));
 
@@ -90,6 +92,9 @@ pub(crate) fn hide_main_window(cx: &App) {
     }
 }
 
+// 窗口拖动由 GPUI 的 WindowControlArea::Drag 命中测试原生实现（见 wisp_view 头部），
+// 无需手工投递 WM_NCLBUTTONDOWN / WM_SYSCOMMAND。
+
 /// 唤起前记录的前台窗口，供粘贴时还原焦点
 pub(crate) fn paste_target(cx: &App) -> Option<isize> {
     cx.try_global::<LastForeground>().and_then(|last| last.0)
@@ -141,6 +146,8 @@ fn main() {
             ClipboardService::start(&db_path, changed_tx).expect("启动剪贴板服务失败"),
         );
         let memo_service = Arc::new(MemoService::open(&db_path).expect("打开备忘库失败"));
+        // 与数据库同目录的轻量配置（上次页面等），进程重启后恢复
+        let config = Config::load(&db_path.with_file_name("wisp.cfg"));
 
         // Alt+Space 大概率被 uTools 等工具占用，按候选顺序降级注册
         let hotkeys = GlobalHotKeyManager::new().expect("初始化全局快捷键失败");
@@ -200,6 +207,7 @@ fn main() {
                     WispView::new(
                         Arc::clone(&clipboard_service),
                         Arc::clone(&memo_service),
+                        config,
                         window,
                         cx,
                     )

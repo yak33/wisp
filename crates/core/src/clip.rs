@@ -26,6 +26,39 @@ impl ClipKind {
     }
 }
 
+/// 列表顶部的分类筛选。图像与文件是剪贴板历史的内部分类
+/// （`ClipKind` 已预留位），不是独立功能。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipFilter {
+    All,
+    Text,
+    Image,
+    Files,
+    /// 仅置顶（收藏）
+    Pinned,
+}
+
+impl ClipFilter {
+    /// 筛选标签行的展示顺序
+    pub const ALL: &[ClipFilter] = &[
+        Self::All,
+        Self::Text,
+        Self::Image,
+        Self::Files,
+        Self::Pinned,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "全部",
+            Self::Text => "文本",
+            Self::Image => "图像",
+            Self::Files => "文件",
+            Self::Pinned => "收藏",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Clip {
     pub id: i64,

@@ -10,9 +10,50 @@
 | M1 | 剪贴板历史（文本） | ✅ 完成 | 2026/08/15 |
 | M2 | 回车直达粘贴（焦点还原 + SendInput） | ✅ 完成 | 2026/08/15 |
 | M4 | 备忘快贴（标签化片段库） | ✅ 完成 | 2026/08/16 |
+| M4.5 | 主页导航（uTools 风格图标网格）+ 窗口拖动 | ✅ 完成 | 2026/08/16 |
 | M3 | 剪贴板图像 / 文件支持 | 📋 计划 | — |
 | M5 | IP 工具（三段 IP + 延迟面板） | 📋 计划 | — |
 | M6 | 开机自启 + release 打包分发 | 📋 计划 | — |
+
+---
+
+## 补丁 · 记住上次页面 + 剪贴板分类 — 2026/08/16
+
+M4.5 的两处修正：页面记忆跨重启生效；图像/文件从主页网格撤下——
+它们是剪贴板历史的内部分类，不是独立功能。
+
+- [x] 上次页面持久化：新增 `config.rs`（key=value 手写解析，零依赖），`open_page` 随写随存到 `wisp.cfg`，启动恢复
+- [x] core 新增 `ClipFilter`（全部 / 文本 / 图像 / 文件 / 收藏），store 查询改动态 SQL，分类与关键字可叠加
+- [x] 剪贴板视图加分类标签行：点击或 `Alt+1~5` 切换；图像 / 文件显示 M3 占位提示
+- [x] 主页移除"图像与文件"卡片；新增表驱动测试 1 例（8 例全绿）
+- [x] **拖动修复（三连坑，最终走原生机制）**：
+      1. `SendMessageW(WM_NCLBUTTONDOWN, HTCAPTION)` 在事件处理器内同步进模态移动循环，
+         借用未释放 + 循环内消息重入 → `RefCell already borrowed` panic。
+      2. 改 Post 后 NC 消息回流成合成鼠标事件进 GPUI 输入分发，被视图树消费，
+         到不了 `DefWindowProc`（不崩也不动）；Post `WM_SYSCOMMAND/SC_MOVE` 同样无效。
+      3. **正解**：头部区域标记 `.window_control_area(WindowControlArea::Drag)`——
+         GPUI Windows 原生支持：`WM_NCHITTEST` 对该区域返回 `HTCAPTION`，Windows 自己
+         接管移动，零消息投递、零重入风险；此前"边框可缩放"正是同一命中测试的另一半（HTTOP 等）。
+      4. **后续坑**：命中链默认穿透 Normal 行为的子元素 hitbox，拖动区的按钮/复选框点击
+         全被当成标题栏拖拽吞掉。可点击子元素必须 `.occlude()`（BlockMouse）截断命中链
+         （Zed 标题栏的 application_menu / collab 按钮同样如此处理）。
+
+---
+
+## M4.5 · 主页导航 + 窗口拖动 — 2026/08/16
+
+把 TabBar 换成 uTools 风格的主页：唤起先落功能网格，点进图标再进功能页。
+新功能此后只需在主页表里加一行，导航结构零改动。
+
+- [x] 新增 `HomeView`：搜索框过滤功能（中文名 / 英文别名），↑↓ 选择、回车 / 单击进入
+- [x] 功能表驱动：剪贴板 / 备忘快贴可用；图像与文件、IP 工具置灰占位（规划中）
+- [x] Esc 语义改为逐层外退：编辑态取消编辑（消费不外冒）→ 功能页回主页 → 主页隐藏窗口
+- [x] Ctrl+1 / Ctrl+2 任意页直达；功能页头部加「‹ 主页」返回
+- [x] 窗口拖动：标题区按下左键 → `ReleaseCapture` + `SendMessageW(WM_NCLBUTTONDOWN, HTCAPTION)`，交系统模态移动循环，无需自追踪鼠标
+- [x] `cargo build` + `cargo test -p wisp-core`（7 例）全绿
+
+**踩坑**：Rust 2024 的 RPIT 捕获全部入参生命周期——卡片渲染函数返回 `impl IntoElement` 会借用
+`&self`/`cx`，导致卡片无法逃出 `map` 闭包；改返回具体类型 `Stateful<Div>` 解决（与 M1 第 3 条同源）。
 
 ---
 
