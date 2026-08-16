@@ -23,6 +23,8 @@ const MAX_TEXT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_IMAGE_PIXELS: u64 = 4096 * 4096;
 /// 缩略图最长边（列表行 40px，2x 屏仍清晰）
 const THUMB_MAX_EDGE: u32 = 128;
+/// 单次文件列表的最大文件数熔断
+const MAX_FILE_COUNT: usize = 100;
 
 pub struct ClipboardService {
     store: Arc<ClipStore>,
@@ -53,7 +55,8 @@ impl ClipboardService {
             .name("wisp-clipboard-worker".into())
             .spawn(move || {
                 for () in clipboard_rx.iter() {
-                    // 先试文本；无文本格式再试图像（写入方可能还占着剪贴板，短退避重试）
+                    // 三格式探测：文本 → 图像 → 文件列表
+                    // （写入方可能还占着剪贴板，各带短退避重试）
                     let inserted = if let Some(text) = read_clipboard_text_with_retry() {
                         if text.trim().is_empty() || text.len() > MAX_TEXT_BYTES {
                             false
@@ -67,6 +70,8 @@ impl ClipboardService {
                             }
                             None => false,
                         }
+                    } else if let Some(files) = read_clipboard_files() {
+                        insert_files(&worker_store, &files)
                     } else {
                         false
                     };
@@ -101,6 +106,11 @@ impl ClipboardService {
                 let png = std::fs::read(&content)
                     .with_context(|| format!("读取图像文件失败: {content}"))?;
                 crate::clip_write::write_image_png(&png)
+            }
+            ClipKind::Files => {
+                let paths: Vec<std::path::PathBuf> =
+                    content.lines().map(std::path::PathBuf::from).collect();
+                crate::clip_write::write_files(&paths)
             }
             _ => retry_write(5, || {
                 arboard::Clipboard::new()
@@ -156,6 +166,42 @@ fn read_clipboard_image() -> Option<arboard::ImageData<'static>> {
         }
     }
     None
+}
+
+fn read_clipboard_files() -> Option<Vec<std::path::PathBuf>> {
+    for attempt in 0..3 {
+        if attempt > 0 {
+            thread::sleep(Duration::from_millis(30));
+        }
+        if let Ok(files) = arboard::Clipboard::new().and_then(|mut c| c.get().file_list()) {
+            return Some(files);
+        }
+    }
+    None
+}
+
+/// 文件列表入库：路径按行拼接为 content，摘要取首文件名。
+fn insert_files(store: &ClipStore, paths: &[std::path::PathBuf]) -> bool {
+    if paths.is_empty() || paths.len() > MAX_FILE_COUNT {
+        return false;
+    }
+    let content = paths
+        .iter()
+        .map(|path| path.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let preview = match paths {
+        [only] => only.file_name().map_or_else(|| content.clone(), |n| n.to_string_lossy().into_owned()),
+        _ => {
+            let first = paths[0]
+                .file_name()
+                .map_or_else(|| paths[0].to_string_lossy().into_owned(), |n| n.to_string_lossy().into_owned());
+            format!("{first} 等 {} 个文件", paths.len())
+        }
+    };
+    store
+        .insert_files(fingerprint(content.as_bytes()), &content, &preview)
+        .is_ok()
 }
 
 /// 图像落盘与缩略图：原图按内容哈希命名存入数据目录（天然去重），

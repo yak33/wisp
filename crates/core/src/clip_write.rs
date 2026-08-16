@@ -10,7 +10,7 @@
 
 use anyhow::{Context as _, Result};
 use windows::{
-    core::PCWSTR,
+    core::{BOOL, PCWSTR},
     Win32::{
         Foundation::{GetLastError, HANDLE, WIN32_ERROR},
         Graphics::Gdi::{BI_BITFIELDS, BITMAPV5HEADER},
@@ -20,13 +20,74 @@ use windows::{
                 SetClipboardData,
             },
             Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GHND},
-            Ole::CF_DIBV5,
+            Ole::{CF_DIBV5, CF_HDROP},
         },
+        UI::Shell::DROPFILES,
     },
 };
 
 /// 注册的 "PNG" 剪贴板格式 ID（进程内不变，注册一次缓存）
 static PNG_FORMAT: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+
+/// 把文件列表写回剪贴板（CF_HDROP）：DROPFILES 头 + 宽字符路径列表，
+/// 每个路径 NUL 结尾、整体再补一个 NUL。与图像写入同一重试框架。
+pub fn write_files(paths: &[std::path::PathBuf]) -> Result<()> {
+    if paths.is_empty() {
+        anyhow::bail!("文件列表为空");
+    }
+
+    let mut wide: Vec<u16> = Vec::new();
+    for path in paths {
+        wide.extend(path.as_os_str().to_string_lossy().encode_utf16());
+        wide.push(0);
+    }
+    wide.push(0); // 列表整体终止符
+
+    let header = DROPFILES {
+        pFiles: std::mem::size_of::<DROPFILES>() as u32,
+        pt: Default::default(),
+        fNC: BOOL(0),
+        fWide: BOOL(1),
+    };
+    let mut blob = Vec::with_capacity(std::mem::size_of::<DROPFILES>() + wide.len() * 2);
+    let header_bytes = unsafe {
+        std::slice::from_raw_parts(
+            (&header as *const DROPFILES).cast::<u8>(),
+            std::mem::size_of::<DROPFILES>(),
+        )
+    };
+    blob.extend_from_slice(header_bytes);
+    blob.extend_from_slice(unsafe {
+        std::slice::from_raw_parts(wide.as_ptr().cast::<u8>(), wide.len() * 2)
+    });
+
+    let mut last: Option<WIN32_ERROR> = None;
+    for attempt in 0..5 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+        let result = unsafe {
+            if OpenClipboard(None).is_err() {
+                Err(GetLastError())
+            } else {
+                let inner = (|| {
+                    EmptyClipboard().map_err(|_| GetLastError())?;
+                    set_format(CF_HDROP.0 as u32, &blob)
+                })();
+                _ = CloseClipboard();
+                inner
+            }
+        };
+        match result {
+            Ok(()) => return Ok(()),
+            Err(err) => last = Some(err),
+        }
+    }
+    let code = last.map(|err| err.0).unwrap_or_default();
+    Err(anyhow::anyhow!(
+        "写入文件列表到剪贴板失败（已重试 5 次，最后错误码 {code}）"
+    ))
+}
 
 /// 把 PNG 字节写回剪贴板。`png` 为原始文件字节（无需解码重编码，
 /// PNG 格式直接透传）；DIBV5 分支内部解码一次转 BGRA。

@@ -317,7 +317,7 @@ impl ClipboardView {
                     // 文本行为首行截断；图像行为"宽×高 · 体积"摘要
                     .child(clip.preview.clone()),
             )
-            .when(!is_image, |row| {
+            .when(clip.kind == ClipKind::Text, |row| {
                 row.child(
                     div()
                         .text_xs()
@@ -341,6 +341,17 @@ impl ClipboardView {
         let preview = tooltip_preview(&clip.content, char_count);
         // 图像行的 content 是落盘路径，悬停时按需解码原图放大显示
         let image_path = (clip.kind == ClipKind::Image).then(|| clip.content.clone());
+        // 文件行的 content 是路径清单，悬停逐行列出文件名
+        let file_names = (clip.kind == ClipKind::Files).then(|| {
+            clip.content
+                .lines()
+                .map(|line| {
+                    std::path::Path::new(line)
+                        .file_name()
+                        .map_or_else(|| line.to_string(), |name| name.to_string_lossy().into_owned())
+                })
+                .collect::<Vec<String>>()
+        });
         let ghost_text = clip.preview.clone();
         let entity = cx.entity();
 
@@ -357,19 +368,18 @@ impl ClipboardView {
                     Tooltip::element({
                         let entity = entity.clone();
                         let path = image_path.clone();
+                        let files = file_names.clone();
                         let preview = preview.clone();
                         move |_, cx| {
-                            // 图像：解码原图放大（失败或文本行走文本预览体）
+                            // 图像：解码原图放大
                             if let Some(path) = path.as_deref() {
-                                if let Some(image) =
-                                    entity.read(cx).preview_image(id, path)
-                                {
-                                    return image_tooltip_body(
-                                        image,
-                                        preview.clone(),
-                                        cx,
-                                    );
+                                if let Some(image) = entity.read(cx).preview_image(id, path) {
+                                    return image_tooltip_body(image, preview.clone(), cx);
                                 }
+                            }
+                            // 文件：逐行列出文件名
+                            if let Some(files) = files.as_ref() {
+                                return files_tooltip_body(files, cx);
                             }
                             clip_tooltip_body(preview.clone(), char_count, cx)
                         }
@@ -564,10 +574,7 @@ impl Render for ClipboardView {
                                 .p_6()
                                 .text_sm()
                                 .text_color(cx.theme().muted_foreground)
-                                .child(match self.filter {
-                                    ClipFilter::Files => "文件剪贴板尚未支持（规划中）",
-                                    _ => "没有匹配的记录",
-                                }),
+                                .child("没有匹配的记录"),
                         )
                     })
                     .when(!self.items.is_empty(), |body| {
@@ -655,6 +662,35 @@ fn image_tooltip_body(image: Arc<RenderImage>, meta: String, cx: &App) -> Div {
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
                 .child(meta),
+        )
+}
+
+/// 文件条目的悬停预览：逐行列出文件名（上限 12 行），尾注交代总数。
+fn files_tooltip_body(names: &[String], cx: &App) -> Div {
+    const MAX_LINES: usize = 12;
+
+    v_flex()
+        .max_w(px(480.))
+        .py_1()
+        .gap_1()
+        .child(
+            v_flex()
+                .min_w(px(320.))
+                .max_h(px(320.))
+                .overflow_hidden()
+                .text_sm()
+                .line_height(relative(1.5))
+                .children(names.iter().take(MAX_LINES).map(|name| div().child(name.clone()))),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(if names.len() > MAX_LINES {
+                    format!("共 {} 个文件", names.len())
+                } else {
+                    format!("{} 个文件", names.len())
+                }),
         )
 }
 

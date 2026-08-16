@@ -14,7 +14,7 @@ mod store;
 mod watcher;
 
 pub use clip::{Clip, ClipFilter, ClipKind};
-pub use clip_write::write_image_png;
+pub use clip_write::{write_files, write_image_png};
 pub use memo::{Memo, MemoDraft, TagFilter, TagSummary, parse_tags};
 pub use memo_service::MemoService;
 pub use paste::capture_foreground;

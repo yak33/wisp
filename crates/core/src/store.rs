@@ -113,6 +113,27 @@ impl ClipStore {
         Ok(())
     }
 
+    /// 文件列表入库。`content` 为全部路径按行拼接（Windows 文件名不含
+    /// 换行，分隔安全），同一批路径只刷新时间戳置顶。
+    pub fn insert_files(&self, hash: i64, content: &str, preview: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("clip store poisoned");
+        let now = now_ms();
+
+        let touched = conn.execute(
+            "UPDATE clips SET created_at = ?1 WHERE kind = ?2 AND hash = ?3",
+            params![now, ClipKind::Files as i64, hash],
+        )?;
+
+        if touched == 0 {
+            conn.execute(
+                "INSERT INTO clips (kind, content, preview, hash, pinned, created_at)
+                 VALUES (?1, ?2, ?3, ?4, 0, ?5)",
+                params![ClipKind::Files as i64, content, preview, hash, now],
+            )?;
+        }
+        Ok(())
+    }
+
     /// 检索：分类与关键字可叠加；空关键字返回该分类下最近记录，置顶项恒排最前。
     pub fn query(&self, filter: ClipFilter, keyword: &str, limit: usize) -> Result<Vec<Clip>> {
         let conn = self.conn.lock().expect("clip store poisoned");
@@ -480,5 +501,26 @@ mod tests {
         let (kind, content) = store.kind_and_content(images[0].id).unwrap();
         assert_eq!(kind, ClipKind::Image);
         assert_eq!(content, path);
+    }
+
+    #[test]
+    fn files_insert_dedups_and_round_trips() {
+        let store = memory_store();
+        let paths = "C:\\a\\报告.docx\nC:\\b\\数据.xlsx";
+        store
+            .insert_files(77, paths, "报告.docx 等 2 个文件")
+            .unwrap();
+        store
+            .insert_files(77, paths, "报告.docx 等 2 个文件")
+            .unwrap();
+
+        let files = store.query(ClipFilter::Files, "", 10).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].content, paths);
+        assert_eq!(files[0].preview, "报告.docx 等 2 个文件");
+        assert!(files[0].thumb.is_none());
+        // 其他分类不含文件条目
+        assert!(store.query(ClipFilter::Text, "", 10).unwrap().is_empty());
+        assert!(store.query(ClipFilter::Image, "", 10).unwrap().is_empty());
     }
 }
