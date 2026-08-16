@@ -8,6 +8,7 @@ mod clipboard_view;
 mod config;
 mod home_view;
 mod memo_view;
+mod ui;
 mod wisp_view;
 
 use std::{path::PathBuf, sync::Arc};

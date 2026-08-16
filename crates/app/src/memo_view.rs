@@ -21,7 +21,7 @@ use gpui_component::{
 };
 use wisp_core::{Memo, MemoDraft, MemoService, TagFilter, TagSummary, parse_tags};
 
-use crate::{hide_main_window, paste_target};
+use crate::{hide_main_window, paste_target, ui::kbd_pill};
 
 const ROW_HEIGHT: Pixels = px(56.);
 const ROW_WIDTH: Pixels = px(560.);
@@ -247,29 +247,47 @@ impl MemoView {
         v_flex()
             .w(SIDEBAR_WIDTH)
             .h_full()
-            .py_1()
-            .gap_0p5()
+            .py_1p5()
+            .gap_1()
             .border_r_1()
-            .border_color(cx.theme().border)
+            .border_color(cx.theme().border.opacity(0.35))
             .children(entries.enumerate().map(|(ix, (name, count, filter))| {
                 let active = self.filter == filter;
                 h_flex()
                     .id(("tag", ix))
-                    .mx_1()
-                    .px_2()
+                    .mx_1p5()
+                    .px_2p5()
                     .py_1()
-                    .rounded_sm()
-                    .text_sm()
+                    .rounded_md()
+                    .text_xs()
                     .justify_between()
-                    .when(active, |row| style_active(row, cx))
+                    .items_center()
+                    .cursor_pointer()
+                    .when(active, |row| {
+                        row.bg(cx.theme().accent)
+                            .text_color(cx.theme().accent_foreground)
+                            .font_medium()
+                    })
                     .when(!active, |row| {
-                        row.hover(|style| style.bg(cx.theme().accent.opacity(0.4)))
+                        row.hover(|style| style.bg(cx.theme().accent.opacity(0.35)))
                     })
                     .child(div().overflow_hidden().whitespace_nowrap().child(name))
                     .child(
                         div()
+                            .px_1p5()
+                            .py_0p5()
+                            .rounded(px(4.))
                             .text_xs()
-                            .text_color(cx.theme().muted_foreground)
+                            .when(active, |badge| {
+                                badge
+                                    .bg(cx.theme().accent_foreground.opacity(0.15))
+                                    .text_color(cx.theme().accent_foreground)
+                            })
+                            .when(!active, |badge| {
+                                badge
+                                    .bg(cx.theme().secondary.opacity(0.6))
+                                    .text_color(cx.theme().muted_foreground)
+                            })
                             .child(count.to_string()),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -283,35 +301,52 @@ impl MemoView {
         let active = ix == self.selected;
         let footnote = row_footnote(memo);
 
-        v_flex()
+        h_flex()
             .w_full()
             .h(ROW_HEIGHT)
             .px_3()
-            .py_1p5()
-            .gap_0p5()
-            .justify_center()
+            .gap_2p5()
+            .items_center()
             .border_b_1()
-            .border_color(cx.theme().border.opacity(0.4))
-            .when(active, |row| style_active(row, cx))
+            .border_color(cx.theme().border.opacity(0.3))
+            .when(active, |row| row.bg(cx.theme().accent.opacity(0.85)))
             .when(!active, |row| {
                 row.hover(|style| style.bg(cx.theme().accent.opacity(0.3)))
             })
+            // 左侧发光 Accent 导轨
             .child(
                 div()
-                    .overflow_hidden()
-                    .text_sm()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .child(memo.preview.clone()),
+                    .w(px(3.))
+                    .h(px(24.))
+                    .rounded_full()
+                    .when(active, |bar| bar.bg(rgb(0x6C5CE7)))
+                    .when(!active, |bar| bar.opacity(0.)),
             )
             .child(
-                div()
-                    .overflow_hidden()
-                    .text_xs()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(footnote),
+                v_flex()
+                    .flex_1()
+                    .gap_0p5()
+                    .justify_center()
+                    .child(
+                        div()
+                            .overflow_hidden()
+                            .text_sm()
+                            .font_medium()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(memo.preview.clone()),
+                    )
+                    .when(!footnote.is_empty(), |body| {
+                        body.child(
+                            div()
+                                .overflow_hidden()
+                                .text_xs()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(footnote),
+                        )
+                    }),
             )
     }
 
@@ -384,10 +419,22 @@ impl MemoView {
             .p_4()
             .gap_3()
             .child(
-                div()
-                    .text_sm()
-                    .font_semibold()
-                    .child(if is_new { "新建备忘" } else { "编辑备忘" }),
+                h_flex()
+                    .justify_between()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_semibold()
+                            .child(if is_new { "新建备忘" } else { "编辑备忘" }),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(kbd_pill("Ctrl+S 保存", cx))
+                            .child(kbd_pill("Esc 取消", cx)),
+                    ),
             )
             .child(Textarea::new(&editor.content).h(px(200.)))
             .child(
@@ -404,7 +451,7 @@ impl MemoView {
                         Button::new("memo-save")
                             .primary()
                             .small()
-                            .label("保存（Ctrl+S）")
+                            .label("保存备忘")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.save_editor(window, cx)
                             })),
@@ -413,7 +460,7 @@ impl MemoView {
                         Button::new("memo-cancel")
                             .ghost()
                             .small()
-                            .label("取消（Esc）")
+                            .label("取消")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.close_editor(window, cx)
                             })),
@@ -425,13 +472,13 @@ impl MemoView {
         let has_selection = !self.items.is_empty();
 
         h_flex()
-            .px_3()
-            .py_1p5()
+            .px_3p5()
+            .py_2()
             .gap_2()
             .items_center()
             .justify_between()
             .border_t_1()
-            .border_color(cx.theme().border)
+            .border_color(cx.theme().border.opacity(0.35))
             .child(
                 h_flex()
                     .gap_2()
@@ -464,16 +511,47 @@ impl MemoView {
                     ),
             )
             .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("Ctrl+N 新建 · Ctrl+E 编辑 · 回车粘贴"),
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .items_center()
+                            .child(kbd_pill("Ctrl+N", cx))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("新建"),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .items_center()
+                            .child(kbd_pill("Ctrl+E", cx))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("编辑"),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .items_center()
+                            .child(kbd_pill("↵", cx))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("粘贴"),
+                            ),
+                    ),
             )
     }
-}
-
-fn style_active<E: Styled>(element: E, cx: &App) -> E {
-    element.bg(cx.theme().accent)
 }
 
 /// 行内小字与悬停尾注共用：备注在前、标签在后，空段自动省略。
@@ -558,7 +636,7 @@ impl Render for MemoView {
                     body.child(self.render_editor(&editor, cx))
                 }
                 None => body
-                    .child(div().px_3().pt_2().pb_1().child(Input::new(&self.search_state)))
+                    .child(div().px_3p5().pt_3().pb_2().child(Input::new(&self.search_state)))
                     .child(
                         h_flex()
                             .flex_1()

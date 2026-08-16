@@ -148,7 +148,7 @@ impl WispView {
 
 impl Render for WispView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let hotkey = cx.try_global::<WakeHotkey>().map_or("快捷键", |k| k.0);
+        let hotkey = cx.try_global::<WakeHotkey>().map_or("Alt+Space", |k| k.0);
 
         v_flex()
             .size_full()
@@ -176,70 +176,83 @@ impl Render for WispView {
                 // 命中链默认会穿透 Normal 行为的子元素 hitbox，可点击的子元素必须 .occlude()
                 // 截断命中链，否则点击被当成标题栏拖拽吞掉（Zed 的标题栏子元素同样如此处理）
                 h_flex()
-                    .px_4()
-                    .pt_3()
+                    .px_3p5()
+                    .py_2()
                     .items_center()
                     .justify_between()
+                    .border_b_1()
+                    .border_color(cx.theme().border.opacity(0.35))
                     .window_control_area(WindowControlArea::Drag)
                     .child(
                         h_flex()
                             .gap_2()
                             .items_center()
+                            .child(
+                                div()
+                                    .size(px(24.))
+                                    .rounded_md()
+                                    .bg(rgb(0x6C5CE7).opacity(0.15))
+                                    .text_color(rgb(0x6C5CE7))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(Icon::new(WispIcon::Logo).w(px(12.)).h(px(18.))),
+                            )
                             .when(self.page != Page::Home, |header| {
-                                header.child(
-                                    h_flex().occlude().child(
-                                        Button::new("back-home")
-                                            .ghost()
-                                            .xsmall()
-                                            .icon(IconName::ChevronLeft)
-                                            .label("主页")
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.open_page(Page::Home, window, cx)
-                                            })),
-                                    ),
-                                )
+                                header
+                                    .child(
+                                        h_flex().occlude().child(
+                                            Button::new("back-home")
+                                                .ghost()
+                                                .xsmall()
+                                                .icon(IconName::ChevronLeft)
+                                                .label("主页")
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.open_page(Page::Home, window, cx)
+                                                })),
+                                        ),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground.opacity(0.6))
+                                            .child("/"),
+                                    )
                             })
+                            .child(
+                                div()
+                                    .font_semibold()
+                                    .text_sm()
+                                    .child(self.page.title()),
+                            ),
+                    )
                     .child(
                         h_flex()
                             .gap_2()
                             .items_center()
-                            // 品牌图形 + 页面标题（标题与小字仍按基线对齐）
-                            .child(Icon::new(WispIcon::Logo).w(px(14.)).h(px(21.)))
+                            .child(crate::ui::kbd_pill(hotkey, cx))
+                            // 钉住 = 失焦不隐藏；未钉住（划掉）= 失焦自动隐藏
                             .child(
-                                h_flex()
-                                    .gap_2()
-                                    .items_baseline()
-                                    .child(div().font_semibold().child(self.page.title()))
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(format!("{hotkey} 显隐 · 按住此处拖动")),
-                                    ),
+                                h_flex().occlude().child(
+                                    Button::new("auto-hide")
+                                        .ghost()
+                                        .xsmall()
+                                        .icon(if self.auto_hide {
+                                            WispIcon::PinOff
+                                        } else {
+                                            WispIcon::Pin
+                                        })
+                                        .tooltip(if self.auto_hide {
+                                            "失焦自动隐藏中 · 点击钉住，失焦不隐藏"
+                                        } else {
+                                            "已钉住，失焦不隐藏 · 点击恢复自动隐藏"
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.auto_hide = !this.auto_hide;
+                                            cx.notify();
+                                        })),
+                                ),
                             ),
-                    ),
-                    )
-                    .child(
-                        // 钉住 = 失焦不隐藏；未钉住（划掉）= 失焦自动隐藏
-                        h_flex().occlude().child(
-                            Button::new("auto-hide")
-                                .ghost()
-                                .xsmall()
-                                .icon(if self.auto_hide {
-                                    WispIcon::PinOff
-                                } else {
-                                    WispIcon::Pin
-                                })
-                                .tooltip(if self.auto_hide {
-                                    "失焦自动隐藏中 · 点击钉住，失焦不隐藏"
-                                } else {
-                                    "已钉住，失焦不隐藏 · 点击恢复自动隐藏"
-                                })
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.auto_hide = !this.auto_hide;
-                                    cx.notify();
-                                })),
-                        ),
                     ),
             )
             .child(
