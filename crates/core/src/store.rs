@@ -40,19 +40,22 @@ impl ClipStore {
                 hash       INTEGER NOT NULL,
                 pinned     INTEGER NOT NULL DEFAULT 0,
                 pos        INTEGER,
-                created_at INTEGER NOT NULL
+                created_at INTEGER NOT NULL,
+                thumb      BLOB
             );
             CREATE INDEX IF NOT EXISTS idx_clips_hash ON clips(hash);
             CREATE INDEX IF NOT EXISTS idx_clips_order ON clips(pinned DESC, created_at DESC);",
         )?;
-        // 旧库补列：pos 是收藏组的手动排序键（新库建表已含）
-        let has_pos = conn.query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('clips') WHERE name = 'pos'",
-            [],
-            |row| row.get::<_, i64>(0),
-        )? != 0;
-        if !has_pos {
-            conn.execute("ALTER TABLE clips ADD COLUMN pos INTEGER", [])?;
+        // 旧库补列：pos 是收藏组的手动排序键，thumb 是图像缩略图（新库建表已含）
+        for (column, decl) in [("pos", "INTEGER"), ("thumb", "BLOB")] {
+            let present = conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('clips') WHERE name = ?1",
+                params![column],
+                |row| row.get::<_, i64>(0),
+            )? != 0;
+            if !present {
+                conn.execute(&format!("ALTER TABLE clips ADD COLUMN {column} {decl}"), [])?;
+            }
         }
 
         Ok(Self {
@@ -65,7 +68,7 @@ impl ClipStore {
     pub fn insert_text(&self, content: &str) -> Result<()> {
         let conn = self.conn.lock().expect("clip store poisoned");
         let now = now_ms();
-        let hash = fingerprint(content);
+        let hash = fingerprint(content.as_bytes());
 
         let touched = conn.execute(
             "UPDATE clips SET created_at = ?1 WHERE hash = ?2 AND content = ?3",
@@ -88,13 +91,35 @@ impl ClipStore {
         Ok(())
     }
 
+    /// 图像入库。同一哈希（FNV-1a 64，同图异码概率可忽略）只刷新时间戳
+    /// 置顶，不做逐字节回比——图像不像文本有廉价的原文比对。
+    /// `content` 为原图落盘路径，`preview` 为"宽×高 · 体积"摘要。
+    pub fn insert_image(&self, hash: i64, content: &str, preview: &str, thumb: &[u8]) -> Result<()> {
+        let conn = self.conn.lock().expect("clip store poisoned");
+        let now = now_ms();
+
+        let touched = conn.execute(
+            "UPDATE clips SET created_at = ?1 WHERE kind = ?2 AND hash = ?3",
+            params![now, ClipKind::Image as i64, hash],
+        )?;
+
+        if touched == 0 {
+            conn.execute(
+                "INSERT INTO clips (kind, content, preview, hash, pinned, created_at, thumb)
+                 VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6)",
+                params![ClipKind::Image as i64, content, preview, hash, now, thumb],
+            )?;
+        }
+        Ok(())
+    }
+
     /// 检索：分类与关键字可叠加；空关键字返回该分类下最近记录，置顶项恒排最前。
     pub fn query(&self, filter: ClipFilter, keyword: &str, limit: usize) -> Result<Vec<Clip>> {
         let conn = self.conn.lock().expect("clip store poisoned");
         let keyword = keyword.trim();
 
         let mut sql = String::from(
-            "SELECT id, kind, content, preview, pinned, created_at FROM clips WHERE 1 = 1",
+            "SELECT id, kind, content, preview, pinned, created_at, thumb FROM clips WHERE 1 = 1",
         );
         let mut args: Vec<String> = Vec::new();
 
@@ -113,7 +138,9 @@ impl ClipStore {
             args.push((kind as i64).to_string());
         }
         if !keyword.is_empty() {
-            sql.push_str(" AND content LIKE ? ESCAPE '\\'");
+            // 关键字只命中文本内容——图像条目的 content 是落盘路径，命中即是噪音
+            sql.push_str(" AND kind = ? AND content LIKE ? ESCAPE '\\'");
+            args.push((ClipKind::Text as i64).to_string());
             args.push(format!("%{}%", escape_like(keyword)));
         }
         // 收藏组按手动排序键 pos 升序，其余按时间倒序；
@@ -136,18 +163,25 @@ impl ClipStore {
                 preview: row.get(3)?,
                 pinned: row.get::<_, i64>(4)? != 0,
                 created_at: row.get(5)?,
+                thumb: row.get(6)?,
             })
         })?;
 
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    pub fn content_of(&self, id: i64) -> Result<String> {
+    /// 条目的类型与内容（文本为原文，图像为原图路径）——交付时按类型分流。
+    pub fn kind_and_content(&self, id: i64) -> Result<(ClipKind, String)> {
         let conn = self.conn.lock().expect("clip store poisoned");
         Ok(conn.query_row(
-            "SELECT content FROM clips WHERE id = ?1",
+            "SELECT kind, content FROM clips WHERE id = ?1",
             params![id],
-            |row| row.get(0),
+            |row| {
+                Ok((
+                    ClipKind::from_i64(row.get(0)?),
+                    row.get::<_, String>(1)?,
+                ))
+            },
         )?)
     }
 
@@ -261,7 +295,8 @@ mod tests {
             "CREATE TABLE clips (
                 id INTEGER PRIMARY KEY, kind INTEGER NOT NULL DEFAULT 0,
                 content TEXT NOT NULL, preview TEXT NOT NULL, hash INTEGER NOT NULL,
-                pinned INTEGER NOT NULL DEFAULT 0, pos INTEGER, created_at INTEGER NOT NULL
+                pinned INTEGER NOT NULL DEFAULT 0, pos INTEGER, created_at INTEGER NOT NULL,
+                thumb BLOB
             );",
         )
         .unwrap();
@@ -419,5 +454,31 @@ mod tests {
         // 重复复制只刷新时间戳，收藏组的手动顺序不受影响
         store.insert_text("乙").unwrap();
         assert_eq!(contents(&store), ["甲", "乙"]);
+    }
+
+    #[test]
+    fn image_insert_dedups_by_hash_and_round_trips() {
+        let store = memory_store();
+        let path = r"C:\Wisp\images\00ff.png";
+        store
+            .insert_image(0xff, path, "800×600 · 12.3 KB", b"thumb-png")
+            .unwrap();
+        // 同哈希再复制：置顶而非新增
+        store
+            .insert_image(0xff, path, "800×600 · 12.3 KB", b"thumb-png")
+            .unwrap();
+
+        let images = store.query(ClipFilter::Image, "", 10).unwrap();
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].content, path);
+        assert_eq!(images[0].preview, "800×600 · 12.3 KB");
+        assert_eq!(images[0].thumb.as_deref(), Some(b"thumb-png".as_slice()));
+        // 文本分类不含图像；全文检索不命中路径
+        assert!(store.query(ClipFilter::Text, "", 10).unwrap().is_empty());
+        assert!(store.query(ClipFilter::All, "00ff", 10).unwrap().is_empty());
+
+        let (kind, content) = store.kind_and_content(images[0].id).unwrap();
+        assert_eq!(kind, ClipKind::Image);
+        assert_eq!(content, path);
     }
 }

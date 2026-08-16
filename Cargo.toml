@@ -29,6 +29,7 @@ tray-icon = "0.21"
 anyhow = "1"
 async-channel = "2"
 crossbeam-channel = "0.5"
+smallvec = "1"
 
 [workspace.dependencies.windows]
 version = "0.61"

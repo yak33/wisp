@@ -1,7 +1,8 @@
 //! 剪贴板历史视图：搜索、键盘导航、回车直达粘贴。
 
 use std::{
-    collections::BTreeSet,
+    cell::RefCell,
+    collections::{BTreeSet, HashMap},
     rc::Rc,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -18,7 +19,7 @@ use gpui_component::{
     tooltip::Tooltip,
     v_flex, v_virtual_list,
 };
-use wisp_core::{Clip, ClipFilter, ClipboardService};
+use wisp_core::{Clip, ClipFilter, ClipKind, ClipboardService};
 
 use crate::{hide_main_window, paste_target};
 
@@ -45,6 +46,8 @@ pub(crate) struct ClipboardView {
     /// 右键菜单正打开的行。该行悬停提示让位，避免两个浮层互相干扰；
     /// 鼠标离开该行或列表刷新时解除。
     context_menu_row: Option<i64>,
+    /// 图像缩略图解码缓存（clip id → GPU 可渲染图像），避免每帧解码
+    thumbs: RefCell<HashMap<i64, Arc<RenderImage>>>,
     scroll_handle: VirtualListScrollHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -78,6 +81,7 @@ impl ClipboardView {
             selected: 0,
             selection: BTreeSet::new(),
             context_menu_row: None,
+            thumbs: RefCell::new(HashMap::new()),
             scroll_handle: VirtualListScrollHandle::new(),
             _subscriptions,
         };
@@ -172,10 +176,35 @@ impl ClipboardView {
         }
     }
 
+    /// 解码缩略图为 GPU 可渲染图像并按条目缓存——每行每帧解码不可接受。
+    fn thumb_image(&self, id: i64, thumb: Option<&[u8]>) -> Option<Arc<RenderImage>> {
+        let Some(bytes) = thumb else {
+            return None;
+        };
+        if let Some(cached) = self.thumbs.borrow().get(&id) {
+            return Some(cached.clone());
+        }
+
+        let decoded = image::load_from_memory(bytes).ok()?.to_rgba8();
+        let (width, height) = (decoded.width(), decoded.height());
+        let mut bgra = decoded.into_raw();
+        for pixel in bgra.chunks_exact_mut(4) {
+            pixel.swap(0, 2); // RenderImage 取 BGRA（同 gpui 的 svg 渲染管线）
+        }
+        let buffer = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_raw(width, height, bgra)
+            .expect("缩略图数据与尺寸不符");
+        let rendered = Arc::new(RenderImage::new(smallvec::smallvec![image::Frame::new(
+            buffer
+        )]));
+        self.thumbs.borrow_mut().insert(id, rendered.clone());
+        Some(rendered)
+    }
+
     fn render_row(&self, ix: usize, cx: &Context<Self>) -> Div {
         let clip = &self.items[ix];
         let is_selected = ix == self.selected;
         let in_set = self.selection.contains(&clip.id);
+        let is_image = clip.kind == ClipKind::Image;
 
         h_flex()
             .w_full()
@@ -192,15 +221,31 @@ impl ClipboardView {
             .when(!is_selected && !in_set, |style| {
                 style.hover(|style| style.bg(cx.theme().accent.opacity(0.3)))
             })
-            .child(
-                div()
-                    .px_1p5()
-                    .py_0p5()
-                    .rounded_sm()
-                    .text_xs()
-                    .bg(cx.theme().secondary)
-                    .child(clip.kind.label()),
-            )
+            .when(is_image, |row| {
+                // 缩略图：28px 定高，object_fit Contain 保比例
+                row.child(
+                    div()
+                        .flex_none()
+                        .h(px(28.))
+                        .w(px(28.))
+                        .rounded_sm()
+                        .overflow_hidden()
+                        .when_some(self.thumb_image(clip.id, clip.thumb.as_deref()), |cell, image| {
+                            cell.child(img(image).size_full())
+                        }),
+                )
+            })
+            .when(!is_image, |row| {
+                row.child(
+                    div()
+                        .px_1p5()
+                        .py_0p5()
+                        .rounded_sm()
+                        .text_xs()
+                        .bg(cx.theme().secondary)
+                        .child(clip.kind.label()),
+                )
+            })
             .when(clip.pinned, |row| {
                 row.child(
                     div()
@@ -216,14 +261,17 @@ impl ClipboardView {
                     .text_sm()
                     .whitespace_nowrap()
                     .text_ellipsis()
+                    // 文本行为首行截断；图像行为"宽×高 · 体积"摘要
                     .child(clip.preview.clone()),
             )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(format!("{} 字符", clip.char_count)),
-            )
+            .when(!is_image, |row| {
+                row.child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(format!("{} 字符", clip.char_count)),
+                )
+            })
             .child(
                 div()
                     .w_16()
@@ -238,6 +286,12 @@ impl ClipboardView {
         let clip = &self.items[ix];
         let (id, pinned, char_count) = (clip.id, clip.pinned, clip.char_count);
         let preview = tooltip_preview(&clip.content, char_count);
+        // 图像行：content 是落盘路径，悬停显示放大图而非路径文本
+        let thumb_rendered = if clip.kind == ClipKind::Image {
+            self.thumb_image(id, clip.thumb.as_deref())
+        } else {
+            None
+        };
         let ghost_text = clip.preview.clone();
         let entity = cx.entity();
 
@@ -253,7 +307,13 @@ impl ClipboardView {
                     }
                     Tooltip::element({
                         let preview = preview.clone();
-                        move |_, cx| clip_tooltip_body(preview.clone(), char_count, cx)
+                        let thumb_rendered = thumb_rendered.clone();
+                        move |_, cx| match &thumb_rendered {
+                            Some(image) => {
+                                image_tooltip_body(image.clone(), preview.clone(), cx)
+                            }
+                            None => clip_tooltip_body(preview.clone(), char_count, cx),
+                        }
                     })
                     .build(window, cx)
                 }
@@ -446,8 +506,7 @@ impl Render for ClipboardView {
                                 .text_sm()
                                 .text_color(cx.theme().muted_foreground)
                                 .child(match self.filter {
-                                    ClipFilter::Image => "图像剪贴板尚未支持（M3 规划中）",
-                                    ClipFilter::Files => "文件剪贴板尚未支持（M3 规划中）",
+                                    ClipFilter::Files => "文件剪贴板尚未支持（规划中）",
                                     _ => "没有匹配的记录",
                                 }),
                         )
@@ -517,6 +576,27 @@ impl Render for HiddenTooltip {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
     }
+}
+
+/// 图像条目的悬停预览：放大图（Contain 保比例）+ 尺寸/体积尾注。
+fn image_tooltip_body(image: Arc<RenderImage>, meta: String, cx: &App) -> Div {
+    v_flex()
+        .py_1()
+        .gap_1()
+        .child(
+            div()
+                .w(px(440.))
+                .h(px(300.))
+                .overflow_hidden()
+                .rounded_sm()
+                .child(img(image).size_full()),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(meta),
+        )
 }
 
 /// 悬停预览正文：保留换行截断至 TOOLTIP_PREVIEW_CHARS 字符，超出补省略号。

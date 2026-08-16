@@ -8712,6 +8712,7 @@ dependencies = [
  "gpui_platform",
  "image",
  "raw-window-handle",
+ "smallvec",
  "tray-icon",
  "windows 0.61.3",
  "winresource",
@@ -8725,6 +8726,7 @@ dependencies = [
  "anyhow",
  "arboard",
  "crossbeam-channel",
+ "image",
  "rusqlite",
  "windows 0.61.3",
 ]

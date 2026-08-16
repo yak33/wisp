@@ -5,13 +5,13 @@
 //! - 工作线程（worker）：收信号 → 读剪贴板 → 入库 → 通知壳层刷新；
 //! - 壳层线程：只做查询与写回剪贴板，全部走 [`ClipboardService`] 方法。
 
-use std::{path::Path, sync::Arc, thread, time::Duration};
+use std::{borrow::Cow, io::Cursor, path::Path, sync::Arc, thread, time::Duration};
 
 use anyhow::{Context as _, Result};
 use crossbeam_channel::Sender;
 
 use crate::{
-    clip::{Clip, ClipFilter},
+    clip::{Clip, ClipFilter, ClipKind, fingerprint},
     paste,
     store::ClipStore,
     watcher,
@@ -19,6 +19,10 @@ use crate::{
 
 /// 超过该体量的文本不进历史（防止异常复制撑爆列表与磁盘）
 const MAX_TEXT_BYTES: usize = 2 * 1024 * 1024;
+/// 图像像素熔断：4K 截图（约 830 万像素）以内全收，再大不入库
+const MAX_IMAGE_PIXELS: u64 = 4096 * 4096;
+/// 缩略图最长边（列表行 40px，2x 屏仍清晰）
+const THUMB_MAX_EDGE: u32 = 128;
 
 pub struct ClipboardService {
     store: Arc<ClipStore>,
@@ -36,6 +40,10 @@ impl ClipboardService {
         let store = Arc::new(ClipStore::open(db_path)?);
         // 启动即清理一次：长期常驻的进程不能只靠入库触发
         store.prune();
+        let images_dir = db_path
+            .parent()
+            .map(|dir| dir.join("images"))
+            .unwrap_or_else(|| Path::new("images").to_path_buf());
 
         let (clipboard_tx, clipboard_rx) = crossbeam_channel::unbounded::<()>();
         let watcher = watcher::start(clipboard_tx)?;
@@ -45,14 +53,25 @@ impl ClipboardService {
             .name("wisp-clipboard-worker".into())
             .spawn(move || {
                 for () in clipboard_rx.iter() {
-                    // 写入方可能还占着剪贴板，短退避重试
-                    let Some(text) = read_clipboard_text_with_retry() else {
-                        continue;
+                    // 先试文本；无文本格式再试图像（写入方可能还占着剪贴板，短退避重试）
+                    let inserted = if let Some(text) = read_clipboard_text_with_retry() {
+                        if text.trim().is_empty() || text.len() > MAX_TEXT_BYTES {
+                            false
+                        } else {
+                            worker_store.insert_text(&text).is_ok()
+                        }
+                    } else if let Some(image) = read_clipboard_image() {
+                        match persist_image(&images_dir, &image) {
+                            Some((hash, path, preview, thumb)) => {
+                                worker_store.insert_image(hash, &path, &preview, &thumb).is_ok()
+                            }
+                            None => false,
+                        }
+                    } else {
+                        false
                     };
-                    if text.trim().is_empty() || text.len() > MAX_TEXT_BYTES {
-                        continue;
-                    }
-                    if worker_store.insert_text(&text).is_ok() {
+
+                    if inserted {
                         worker_store.prune();
                         _ = changed_tx.try_send(());
                     }
@@ -72,11 +91,27 @@ impl ClipboardService {
     }
 
     /// 将指定条目写回系统剪贴板（触发监听回环，该条自动置顶）。
+    /// 文本直接写；图像从落盘文件解码后写回。
     pub fn copy_to_clipboard(&self, id: i64) -> Result<()> {
-        let content = self.store.content_of(id)?;
-        arboard::Clipboard::new()
-            .and_then(|mut clipboard| clipboard.set_text(content))
-            .context("写入系统剪贴板失败")
+        let (kind, content) = self.store.kind_and_content(id)?;
+        let mut clipboard = arboard::Clipboard::new().context("打开系统剪贴板失败")?;
+
+        match kind {
+            ClipKind::Image => {
+                let bytes = std::fs::read(&content)
+                    .with_context(|| format!("读取图像文件失败: {content}"))?;
+                let decoded = image::load_from_memory(&bytes).context("解码图像失败")?;
+                let rgba = decoded.to_rgba8();
+                clipboard
+                    .set_image(arboard::ImageData {
+                        width: rgba.width() as usize,
+                        height: rgba.height() as usize,
+                        bytes: Cow::Owned(rgba.into_raw()),
+                    })
+                    .context("写入系统剪贴板失败")
+            }
+            _ => clipboard.set_text(content).context("写入系统剪贴板失败"),
+        }
     }
 
     /// 写回剪贴板并直接粘贴到 `target` 窗口；`target` 为空时退化为仅复制。
@@ -114,4 +149,83 @@ fn read_clipboard_text_with_retry() -> Option<String> {
         }
     }
     None
+}
+
+fn read_clipboard_image() -> Option<arboard::ImageData<'static>> {
+    for attempt in 0..3 {
+        if attempt > 0 {
+            thread::sleep(Duration::from_millis(30));
+        }
+        if let Ok(image) = arboard::Clipboard::new().and_then(|mut c| c.get_image()) {
+            return Some(image);
+        }
+    }
+    None
+}
+
+/// 图像落盘与缩略图：原图按内容哈希命名存入数据目录（天然去重），
+/// 缩略图（最长边 128px 的 PNG）随库行走。返回
+/// (hash, 原图路径, "宽×高 · 体积" 摘要, 缩略图字节)。
+fn persist_image(
+    dir: &Path,
+    image: &arboard::ImageData<'_>,
+) -> Option<(i64, String, String, Vec<u8>)> {
+    use image::imageops::FilterType;
+    use image::ImageFormat;
+
+    let (width, height) = (image.width as u32, image.height as u32);
+    let bytes = image.bytes.as_ref();
+    if width == 0
+        || height == 0
+        || bytes.len() != width as usize * height as usize * 4
+        || u64::from(width) * u64::from(height) > MAX_IMAGE_PIXELS
+    {
+        return None;
+    }
+
+    let hash = fingerprint(bytes);
+    let buffer = image::RgbaImage::from_raw(width, height, bytes.to_vec())?;
+
+    // 原图 PNG 编码（无损，截图/图形类内容压缩率高）
+    let mut png = Vec::new();
+    buffer
+        .write_to(&mut Cursor::new(&mut png), ImageFormat::Png)
+        .ok()?;
+    std::fs::create_dir_all(dir).ok()?;
+    let path = dir.join(format!("{hash:016x}.png"));
+    if !path.exists() {
+        std::fs::write(&path, &png).ok()?;
+    }
+
+    // 缩略图
+    let scale = f64::from(THUMB_MAX_EDGE) / f64::from(width.max(height));
+    let thumb_image = if scale < 1.0 {
+        image::imageops::resize(
+            &buffer,
+            (f64::from(width) * scale).round() as u32,
+            (f64::from(height) * scale).round() as u32,
+            FilterType::Triangle,
+        )
+    } else {
+        buffer
+    };
+    let mut thumb = Vec::new();
+    thumb_image
+        .write_to(&mut Cursor::new(&mut thumb), ImageFormat::Png)
+        .ok()?;
+
+    let preview = format!("{width}×{height} · {}", human_size(png.len()));
+    Some((hash, path.to_string_lossy().into_owned(), preview, thumb))
+}
+
+fn human_size(bytes: usize) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = 1024.0 * KB;
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if (bytes as f64) < MB {
+        format!("{:.1} KB", bytes as f64 / KB)
+    } else {
+        format!("{:.1} MB", bytes as f64 / MB)
+    }
 }

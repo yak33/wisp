@@ -63,23 +63,25 @@ impl ClipFilter {
 pub struct Clip {
     pub id: i64,
     pub kind: ClipKind,
+    /// 文本条目为原文；图像条目为原图 PNG 的落盘路径
     pub content: String,
-    /// 列表展示用的单行摘要（入库时生成，避免每帧截断大文本）
+    /// 列表展示用的单行摘要（文本为首行截断，图像为"宽×高 · 体积"）
     pub preview: String,
     pub pinned: bool,
     /// Unix 毫秒
     pub created_at: i64,
     pub char_count: i64,
+    /// 图像条目的缩略图 PNG 字节（文本条目为 None）
+    pub thumb: Option<Vec<u8>>,
 }
 
 /// 内容指纹：FNV-1a 64。仅用于去重预筛，命中后仍比对原文，
 /// 因此哈希碰撞不会造成误判，只会多一次字符串比较。
-pub(crate) fn fingerprint(content: &str) -> i64 {
+pub(crate) fn fingerprint(bytes: &[u8]) -> i64 {
     const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
 
-    let hash = content
-        .as_bytes()
+    let hash = bytes
         .iter()
         .fold(OFFSET, |hash, &byte| (hash ^ byte as u64).wrapping_mul(PRIME));
     hash as i64

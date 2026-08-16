@@ -28,3 +28,4 @@ anyhow.workspace = true
 async-channel.workspace = true
 crossbeam-channel.workspace = true
 image.workspace = true
+smallvec.workspace = true
