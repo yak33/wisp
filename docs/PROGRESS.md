@@ -17,6 +17,20 @@
 
 ---
 
+## 补丁 · 窗口不进任务栏 — 2026/08/16
+
+唤起窗口不再出现在任务栏与 Alt+Tab，且悬浮于普通窗口之上。
+
+- 第一版踩坑：创建后手工补 `WS_EX_TOOLWINDOW` 无效——gpui 对
+  `WindowKind::Normal`（默认）创建时强制 `WS_EX_APPWINDOW`（强制进任务栏），
+  两位共存时 Shell 认 APPWINDOW，任务栏按钮照旧
+- **正解**：`WindowOptions` 里 `kind: WindowKind::PopUp`——gpui 原生以
+  `WS_EX_TOOLWINDOW | WS_EX_TOPMOST` 创建，无需手工改样式；置顶正是
+  启动器期望的形态（失焦即隐藏，不会赖着不走）
+- 验证：枚举实际窗口 EXSTYLE = TOOLWINDOW✓ APPWINDOW✗ TOPMOST✓
+
+---
+
 ## M3 · 剪贴板图像支持 — 2026/08/16
 
 复制图像与截图自动入库，列表缩略图 + 悬停放大，交付链路写回原图。

@@ -317,6 +317,9 @@ fn main() {
             titlebar: None,
             window_bounds: Some(WindowBounds::centered(WINDOW_SIZE, cx)),
             window_decorations: Some(WindowDecorations::Client),
+            // 启动器形态：gpui 以 WS_EX_TOOLWINDOW | WS_EX_TOPMOST 创建——
+            // 不进任务栏与 Alt+Tab，且悬浮于普通窗口之上（uTools 同款）
+            kind: WindowKind::PopUp,
             ..Default::default()
         };
 
