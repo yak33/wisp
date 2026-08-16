@@ -5,7 +5,7 @@
 //! - 工作线程（worker）：收信号 → 读剪贴板 → 入库 → 通知壳层刷新；
 //! - 壳层线程：只做查询与写回剪贴板，全部走 [`ClipboardService`] 方法。
 
-use std::{borrow::Cow, io::Cursor, path::Path, sync::Arc, thread, time::Duration};
+use std::{io::Cursor, path::Path, sync::Arc, thread, time::Duration};
 
 use anyhow::{Context as _, Result};
 use crossbeam_channel::Sender;
@@ -91,26 +91,21 @@ impl ClipboardService {
     }
 
     /// 将指定条目写回系统剪贴板（触发监听回环，该条自动置顶）。
-    /// 文本直接写；图像从落盘文件解码后写回。
+    /// 文本走 arboard；图像走裸 Win32 双格式写入——arboard 3.6.1 的
+    /// Windows 图像路径在本机持续失败（SetClipboardData 1418）。
     pub fn copy_to_clipboard(&self, id: i64) -> Result<()> {
         let (kind, content) = self.store.kind_and_content(id)?;
-        let mut clipboard = arboard::Clipboard::new().context("打开系统剪贴板失败")?;
 
         match kind {
             ClipKind::Image => {
-                let bytes = std::fs::read(&content)
+                let png = std::fs::read(&content)
                     .with_context(|| format!("读取图像文件失败: {content}"))?;
-                let decoded = image::load_from_memory(&bytes).context("解码图像失败")?;
-                let rgba = decoded.to_rgba8();
-                clipboard
-                    .set_image(arboard::ImageData {
-                        width: rgba.width() as usize,
-                        height: rgba.height() as usize,
-                        bytes: Cow::Owned(rgba.into_raw()),
-                    })
-                    .context("写入系统剪贴板失败")
+                crate::clip_write::write_image_png(&png)
             }
-            _ => clipboard.set_text(content).context("写入系统剪贴板失败"),
+            _ => retry_write(5, || {
+                arboard::Clipboard::new()
+                    .and_then(|mut clipboard| clipboard.set_text(content.clone()))
+            }),
         }
     }
 
@@ -228,4 +223,27 @@ fn human_size(bytes: usize) -> String {
     } else {
         format!("{:.1} MB", bytes as f64 / MB)
     }
+}
+
+/// 剪贴板独占竞争的写入重试：每次重试完整重建 open→write→close 序列。
+fn retry_write<T>(
+    attempts: usize,
+    mut write: impl FnMut() -> std::result::Result<T, arboard::Error>,
+) -> Result<T> {
+    let mut last: Option<arboard::Error> = None;
+    for attempt in 0..attempts {
+        if attempt > 0 {
+            thread::sleep(Duration::from_millis(30));
+        }
+        match write() {
+            Ok(value) => return Ok(value),
+            Err(err) => last = Some(err),
+        }
+    }
+    let detail = last
+        .map(|err| err.to_string())
+        .unwrap_or_else(|| "未知错误".into());
+    Err(anyhow::anyhow!(
+        "写入系统剪贴板失败（已重试 {attempts} 次）: {detail}"
+    ))
 }

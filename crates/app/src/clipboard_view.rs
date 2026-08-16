@@ -31,6 +31,10 @@ const TOOLTIP_DELAY: Duration = Duration::from_millis(300);
 /// 悬停预览最多渲染的字符数。单条入库上限 2MB，正文只渲染截断预览，
 /// 完整长度由尾注交代，防止超大内容卡住渲染。
 const TOOLTIP_PREVIEW_CHARS: usize = 500;
+/// 图像悬停放大预览的最长边（预览框 440×300，高 DPI 屏亦清晰）
+const PREVIEW_MAX_EDGE: u32 = 640;
+/// 放大预览缓存上限（条），超出整体清空——防长会话内存膨胀
+const PREVIEW_CACHE_MAX: usize = 12;
 
 pub(crate) struct ClipboardView {
     service: Arc<ClipboardService>,
@@ -48,6 +52,8 @@ pub(crate) struct ClipboardView {
     context_menu_row: Option<i64>,
     /// 图像缩略图解码缓存（clip id → GPU 可渲染图像），避免每帧解码
     thumbs: RefCell<HashMap<i64, Arc<RenderImage>>>,
+    /// 悬停放大预览缓存（解码原图压到 640px，见 [`Self::preview_image`]）
+    previews: RefCell<HashMap<i64, Arc<RenderImage>>>,
     scroll_handle: VirtualListScrollHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -82,6 +88,7 @@ impl ClipboardView {
             selection: BTreeSet::new(),
             context_menu_row: None,
             thumbs: RefCell::new(HashMap::new()),
+            previews: RefCell::new(HashMap::new()),
             scroll_handle: VirtualListScrollHandle::new(),
             _subscriptions,
         };
@@ -122,7 +129,9 @@ impl ClipboardView {
             self.deliver_id(clip.id, cx);
         } else {
             hide_main_window(cx);
-            _ = self.service.copy_to_clipboard(clip.id);
+            if let Err(err) = self.service.copy_to_clipboard(clip.id) {
+                eprintln!("仅复制失败: {err:#}");
+            }
         }
     }
 
@@ -130,7 +139,9 @@ impl ClipboardView {
     fn deliver_id(&mut self, id: i64, cx: &mut Context<Self>) {
         let target = paste_target(cx);
         hide_main_window(cx);
-        _ = self.service.paste_to(id, target);
+        if let Err(err) = self.service.paste_to(id, target) {
+            eprintln!("交付失败: {err:#}");
+        }
     }
 
     /// 单击选择：切换该条的多选状态，键盘光标随之移过去。
@@ -197,6 +208,48 @@ impl ClipboardView {
             buffer
         )]));
         self.thumbs.borrow_mut().insert(id, rendered.clone());
+        Some(rendered)
+    }
+
+    /// 悬停放大预览：解码原图并压到最长边 640——缩略图只有 128px，
+    /// 硬拉到 440×300 的预览框必然发糊。含文件 IO，只在悬停时调用，
+    /// 不进渲染热路径；缓存设上限防长会话膨胀。
+    fn preview_image(&self, id: i64, path: &str) -> Option<Arc<RenderImage>> {
+        if let Some(cached) = self.previews.borrow().get(&id) {
+            return Some(cached.clone());
+        }
+
+        let bytes = std::fs::read(path).ok()?;
+        let decoded = image::load_from_memory(&bytes).ok()?.to_rgba8();
+        let (width, height) = (decoded.width(), decoded.height());
+        let scale = f64::from(PREVIEW_MAX_EDGE) / f64::from(width.max(height));
+        let fitted = if scale < 1.0 {
+            image::imageops::resize(
+                &decoded,
+                ((f64::from(width) * scale).round() as u32).max(1),
+                ((f64::from(height) * scale).round() as u32).max(1),
+                image::imageops::FilterType::Triangle,
+            )
+        } else {
+            decoded
+        };
+        let (fit_w, fit_h) = (fitted.width(), fitted.height());
+
+        let mut bgra = fitted.into_raw();
+        for pixel in bgra.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+        }
+        let buffer = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_raw(fit_w, fit_h, bgra)
+            .expect("预览数据与尺寸不符");
+        let rendered = Arc::new(RenderImage::new(smallvec::smallvec![image::Frame::new(
+            buffer
+        )]));
+
+        let mut cache = self.previews.borrow_mut();
+        if cache.len() >= PREVIEW_CACHE_MAX {
+            cache.clear();
+        }
+        cache.insert(id, rendered.clone());
         Some(rendered)
     }
 
@@ -286,12 +339,8 @@ impl ClipboardView {
         let clip = &self.items[ix];
         let (id, pinned, char_count) = (clip.id, clip.pinned, clip.char_count);
         let preview = tooltip_preview(&clip.content, char_count);
-        // 图像行：content 是落盘路径，悬停显示放大图而非路径文本
-        let thumb_rendered = if clip.kind == ClipKind::Image {
-            self.thumb_image(id, clip.thumb.as_deref())
-        } else {
-            None
-        };
+        // 图像行的 content 是落盘路径，悬停时按需解码原图放大显示
+        let image_path = (clip.kind == ClipKind::Image).then(|| clip.content.clone());
         let ghost_text = clip.preview.clone();
         let entity = cx.entity();
 
@@ -306,13 +355,23 @@ impl ClipboardView {
                         return cx.new(|_| HiddenTooltip).into();
                     }
                     Tooltip::element({
+                        let entity = entity.clone();
+                        let path = image_path.clone();
                         let preview = preview.clone();
-                        let thumb_rendered = thumb_rendered.clone();
-                        move |_, cx| match &thumb_rendered {
-                            Some(image) => {
-                                image_tooltip_body(image.clone(), preview.clone(), cx)
+                        move |_, cx| {
+                            // 图像：解码原图放大（失败或文本行走文本预览体）
+                            if let Some(path) = path.as_deref() {
+                                if let Some(image) =
+                                    entity.read(cx).preview_image(id, path)
+                                {
+                                    return image_tooltip_body(
+                                        image,
+                                        preview.clone(),
+                                        cx,
+                                    );
+                                }
                             }
-                            None => clip_tooltip_body(preview.clone(), char_count, cx),
+                            clip_tooltip_body(preview.clone(), char_count, cx)
                         }
                     })
                     .build(window, cx)
