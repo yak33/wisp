@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use gpui::{prelude::FluentBuilder as _, *};
 use gpui_component::{
-    ActiveTheme as _, IconName, Sizable as _, StyledExt as _,
+    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
     h_flex, v_flex,
 };
@@ -199,6 +199,12 @@ impl Render for WispView {
                                     ),
                                 )
                             })
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            // 品牌图形 + 页面标题（标题与小字仍按基线对齐）
+                            .child(Icon::new(WispIcon::Logo).w(px(14.)).h(px(21.)))
                             .child(
                                 h_flex()
                                     .gap_2()
@@ -211,6 +217,7 @@ impl Render for WispView {
                                             .child(format!("{hotkey} 显隐 · 按住此处拖动")),
                                     ),
                             ),
+                    ),
                     )
                     .child(
                         // 钉住 = 失焦不隐藏；未钉住（划掉）= 失焦自动隐藏

@@ -30,13 +30,16 @@ impl AssetSource for WispAssets {
             "icons/pin-off.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
                 "../assets/icons/pin-off.svg"
             ) as &[u8]))),
+            "icons/logo.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/icons/logo.svg"
+            ) as &[u8]))),
             _ => self.base.load(path),
         }
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         let mut entries = self.base.list(path)?;
-        for name in ["icons/pin.svg", "icons/pin-off.svg"] {
+        for name in ["icons/pin.svg", "icons/pin-off.svg", "icons/logo.svg"] {
             if name.starts_with(path) {
                 entries.push(name.into());
             }
@@ -52,6 +55,8 @@ pub(crate) enum WispIcon {
     Pin,
     /// 未钉住（失焦自动隐藏）
     PinOff,
+    /// 轻烟精灵本体（窗口标题旁的品牌图形）
+    Logo,
 }
 
 impl IconNamed for WispIcon {
@@ -59,6 +64,7 @@ impl IconNamed for WispIcon {
         match self {
             Self::Pin => "icons/pin.svg".into(),
             Self::PinOff => "icons/pin-off.svg".into(),
+            Self::Logo => "icons/logo.svg".into(),
         }
     }
 }

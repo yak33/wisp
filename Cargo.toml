@@ -2,6 +2,8 @@
 resolver = "2"
 members = ["crates/core", "crates/app"]
 default-members = ["crates/app"]
+# 工具链脚本独立编译，不进 workspace 依赖图
+exclude = ["tools"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,6 +12,7 @@ authors = ["ZHANGCHAO"]
 
 [workspace.dependencies]
 wisp-core = { path = "crates/core" }
+image = "0.25"
 
 # UI 层：与 PoC 验证过的组合一致（gpui-component 锁 rev，gpui 跟随其要求）
 gpui = { version = "0.2.2", git = "https://github.com/zed-industries/zed" }

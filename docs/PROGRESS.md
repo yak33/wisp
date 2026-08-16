@@ -17,6 +17,25 @@
 
 ---
 
+## 补丁 · 品牌图标落地 — 2026/08/16
+
+GPT 生成的三件套（logo / icon / favicon，统一蓝青紫渐变的"轻烟精灵"）接入应用。
+
+- [x] `tools/gen-icons`：独立 Rust 工具（workspace 之外），resvg 渲染 SVG 母版
+      产出全部位图资产；多尺寸 ico 大尺寸走 icon.svg、小尺寸走 favicon.svg
+      （小尺寸优化变体），与专业图标集同策略；ICO 容器手写（PNG 帧直排）
+- [x] exe 图标：`winresource` build.rs 嵌入多尺寸 app.ico（M6 资源基建），
+      `ExtractAssociatedIcon` 验证 32px 渲染清晰
+- [x] 托盘：手绘紫圆退役，改嵌入 favicon 变体 32px PNG（image 解码喂
+      `Icon::from_rgba`，解码失败回退紫圆）
+- [x] README 顶部换 banner.png（logo.svg 以系统字体渲染 Segoe UI 回退）
+- [x] 窗口头部加品牌图形：favicon 抽出精灵本体（去深底、裁紧 viewBox）
+      为 `logo.svg`，走 `WispIcon` 自有图标通路渲染于页面标题旁
+- [x] 踩坑：ICO 头的保留位 WORD 与目录项的平面/位深 WORD 拼错，
+      rc.exe 报 RC2175（not in 3.00 format）——二进制容器格式不能凭记忆手拼
+
+---
+
 ## 补丁 · 剪贴板交互重构 — 2026/08/16
 
 对齐 uTools 的列表交互模型：单击即上屏容易误触，改为显式的选择/交付分离。

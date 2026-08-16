@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Wisp icon</title>
+  <desc id="desc">A minimal glowing wisp character icon.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#0B1640"/>
+      <stop offset="1" stop-color="#101C55"/>
+    </linearGradient>
+    <linearGradient id="wisp" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#246BFD"/>
+      <stop offset="0.52" stop-color="#28D7FF"/>
+      <stop offset="1" stop-color="#9B5CFF"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="54" fill="url(#bg)"/>
+  <path d="M128 220c-47-8-78-36-77-73 1-31 18-50 42-67 16-11 28-23 31-42 2-12 0-21-5-31 37 14 63 45 63 79 0 22-8 40-23 55-12 13-27 23-45 32 27-3 49-14 68-34 1 29-10 53-29 67-10 8-19 11-25 14z" fill="url(#wisp)"/>
+  <path d="M123 191c-23-12-35-29-34-48 1-17 11-31 27-43 12-9 20-19 22-31 17 13 26 29 25 48-1 20-12 37-31 51-5 4-8 10-9 23z" fill="#F5FBFF" opacity=".96"/>
+  <path d="M127 139c-13-10-19-22-17-34 2-10 9-19 20-25 9-6 15-14 16-24 10 11 14 23 11 37-3 14-12 27-30 46z" fill="#101B45"/>
+  <ellipse cx="123" cy="111" rx="7" ry="11" fill="#fff"/>
+  <ellipse cx="151" cy="106" rx="7" ry="11" fill="#fff"/>
+  <circle cx="196" cy="62" r="3" fill="#28D7FF" opacity=".9"/>
+  <circle cx="62" cy="111" r="3" fill="#9B5CFF" opacity=".75"/>
+</svg>

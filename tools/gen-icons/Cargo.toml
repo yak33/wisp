@@ -1,0 +1,9 @@
+[package]
+name = "gen-icons"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# 与主仓库 Cargo.lock 里 gpui 带的版本一致，无额外编译成本
+resvg = "0.45"

@@ -111,6 +111,15 @@ pub(crate) fn paste_target(cx: &App) -> Option<isize> {
 // ==================== 托盘 ====================
 
 fn tray_icon_image() -> tray_icon::Icon {
+    // 品牌图标（favicon 变体 32px 渲染产物）；解码失败退回紫色圆点
+    if let Ok(img) = image::load_from_memory(include_bytes!("../assets/tray.png")) {
+        let rgba = img.to_rgba8();
+        let (width, height) = (rgba.width(), rgba.height());
+        if let Ok(icon) = tray_icon::Icon::from_rgba(rgba.into_raw(), width, height) {
+            return icon;
+        }
+    }
+
     const SIZE: u32 = 32;
     let center = (SIZE / 2) as i32;
     let radius = center - 2;

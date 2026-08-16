@@ -1,5 +1,7 @@
 # Wisp
 
+![Wisp](docs/banner.png)
+
 > 轻若无物的 Windows 效率工具 —— 剪贴板历史 · 备忘快贴 · IP 工具
 
 ![Rust](https://img.shields.io/badge/Rust-2024-orange?logo=rust)

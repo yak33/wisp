@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 180" role="img" aria-labelledby="title desc">
+  <title id="title">Wisp logo</title>
+  <desc id="desc">A minimal flowing wisp mark followed by the Wisp wordmark.</desc>
+  <defs>
+    <linearGradient id="wispGradient" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#246BFD"/>
+      <stop offset="0.52" stop-color="#28D7FF"/>
+      <stop offset="1" stop-color="#9B5CFF"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Wisp mark -->
+  <g transform="translate(18 12)">
+    <path d="M77 143c-24-8-43-24-48-46-6-24 7-44 26-57 12-8 22-18 24-31 2-10 0-17-3-23 25 12 43 34 43 60 0 15-5 28-14 39-8 10-17 18-28 26 17-5 32-14 43-27 3 24-4 43-18 54-8 7-16 10-25 12z" fill="url(#wispGradient)"/>
+    <path d="M69 127c-15-8-23-19-23-32 0-12 7-22 18-30 10-7 17-15 19-25 11 9 18 21 18 35 0 15-8 28-22 38-4 3-7 7-10 14z" fill="#F5FBFF" opacity=".95"/>
+    <path d="M76 91c-10-8-14-17-12-27 2-8 7-14 15-19 7-5 11-10 12-17 7 8 10 17 8 27-2 11-9 20-23 36z" fill="#14244F"/>
+    <circle cx="76" cy="72" r="4.5" fill="#fff"/>
+    <circle cx="92" cy="68" r="4.5" fill="#fff"/>
+  </g>
+
+  <!-- Wordmark -->
+  <g fill="#10182E">
+    <text x="175" y="123" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="92" font-weight="800" letter-spacing="8">WISP</text>
+  </g>
+  <!-- Gradient slash replacing the I accent -->
+  <path d="M274 50l22-8-22 70-22 8z" fill="url(#wispGradient)"/>
+  <text x="179" y="151" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" font-weight="600" letter-spacing="5" fill="#6E7892">LIGHT · FAST · SIMPLE · POWERFUL</text>
+</svg>
