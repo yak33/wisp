@@ -94,6 +94,11 @@ impl ClipboardService {
         self.store.toggle_pin(id)
     }
 
+    /// 收藏组内拖动排序：`moved_id` 移到 `before_id` 之前，`None` 为组尾。
+    pub fn reorder_pinned(&self, moved_id: i64, before_id: Option<i64>) -> Result<()> {
+        self.store.reorder_pinned(moved_id, before_id)
+    }
+
     pub fn delete(&self, id: i64) -> Result<()> {
         self.store.delete(id)
     }

@@ -39,11 +39,21 @@ impl ClipStore {
                 preview    TEXT    NOT NULL,
                 hash       INTEGER NOT NULL,
                 pinned     INTEGER NOT NULL DEFAULT 0,
+                pos        INTEGER,
                 created_at INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_clips_hash ON clips(hash);
             CREATE INDEX IF NOT EXISTS idx_clips_order ON clips(pinned DESC, created_at DESC);",
         )?;
+        // 旧库补列：pos 是收藏组的手动排序键（新库建表已含）
+        let has_pos = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('clips') WHERE name = 'pos'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )? != 0;
+        if !has_pos {
+            conn.execute("ALTER TABLE clips ADD COLUMN pos INTEGER", [])?;
+        }
 
         Ok(Self {
             conn: Mutex::new(conn),
@@ -106,7 +116,13 @@ impl ClipStore {
             sql.push_str(" AND content LIKE ? ESCAPE '\\'");
             args.push(format!("%{}%", escape_like(keyword)));
         }
-        sql.push_str(" ORDER BY pinned DESC, created_at DESC LIMIT ?");
+        // 收藏组按手动排序键 pos 升序，其余按时间倒序；
+        // id 兜底保证同毫秒写入时顺序稳定（旧行优先，与建库以来的行为一致）
+        sql.push_str(
+            " ORDER BY pinned DESC, \
+               CASE WHEN pinned = 1 THEN COALESCE(pos, 0) ELSE -created_at END ASC, \
+               created_at DESC, id ASC LIMIT ?",
+        );
         args.push(limit.to_string());
 
         let mut stmt = conn.prepare(&sql)?;
@@ -135,9 +151,53 @@ impl ClipStore {
         )?)
     }
 
+    /// 收藏/取消收藏。新收藏落在收藏组**顶部**（pos 取组内最小值减一），
+    /// 取消收藏清空排序键回到时间序。CASE 读到的是更新前的旧值。
     pub fn toggle_pin(&self, id: i64) -> Result<()> {
         let conn = self.conn.lock().expect("clip store poisoned");
-        conn.execute("UPDATE clips SET pinned = 1 - pinned WHERE id = ?1", params![id])?;
+        conn.execute(
+            "UPDATE clips SET
+                 pinned = 1 - pinned,
+                 pos = CASE WHEN pinned = 0
+                     THEN (SELECT COALESCE(MIN(pos), 0) - 1 FROM clips WHERE pinned = 1)
+                     ELSE NULL END
+             WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    /// 收藏组内拖动排序：`moved_id` 移到 `before_id` 之前，`None` 为组尾。
+    /// 非收藏条目或目标不在收藏组时静默忽略。整组重编号（间距 100）——
+    /// 收藏组是用户精选、体量小，重编号无感知成本。
+    pub(crate) fn reorder_pinned(&self, moved_id: i64, before_id: Option<i64>) -> Result<()> {
+        let mut conn = self.conn.lock().expect("clip store poisoned");
+        let tx = conn.transaction()?;
+
+        let mut ids: Vec<i64> = {
+            let mut stmt = tx.prepare(
+                "SELECT id FROM clips WHERE pinned = 1
+                 ORDER BY COALESCE(pos, 0) ASC, created_at DESC, id DESC",
+            )?;
+            let rows = stmt.query_map([], |row| row.get(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        if !ids.contains(&moved_id) {
+            return Ok(());
+        }
+        ids.retain(|&id| id != moved_id);
+        match before_id {
+            Some(before) => match ids.iter().position(|&id| id == before) {
+                Some(at) => ids.insert(at, moved_id),
+                None => return Ok(()),
+            },
+            None => ids.push(moved_id),
+        }
+        for (ix, &id) in ids.iter().enumerate() {
+            let pos = (ix as i64 + 1) * 100;
+            tx.execute("UPDATE clips SET pos = ?1 WHERE id = ?2", params![pos, id])?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -201,13 +261,26 @@ mod tests {
             "CREATE TABLE clips (
                 id INTEGER PRIMARY KEY, kind INTEGER NOT NULL DEFAULT 0,
                 content TEXT NOT NULL, preview TEXT NOT NULL, hash INTEGER NOT NULL,
-                pinned INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL
+                pinned INTEGER NOT NULL DEFAULT 0, pos INTEGER, created_at INTEGER NOT NULL
             );",
         )
         .unwrap();
         ClipStore {
             conn: Mutex::new(conn),
         }
+    }
+
+    fn id_of(store: &ClipStore, keyword: &str) -> i64 {
+        store.query(ClipFilter::All, keyword, 1).unwrap()[0].id
+    }
+
+    fn contents(store: &ClipStore) -> Vec<String> {
+        store
+            .query(ClipFilter::All, "", 10)
+            .unwrap()
+            .iter()
+            .map(|clip| clip.content.clone())
+            .collect()
     }
 
     #[test]
@@ -305,5 +378,46 @@ mod tests {
         kept.sort_unstable();
         // 置顶的第一条豁免；未置顶保留最新的两条（同毫秒按 id 兜底，最旧的是第二条）
         assert_eq!(kept, vec!["第一条", "第三条", "第四条"]);
+    }
+
+    #[test]
+    fn pinned_group_stacks_by_pin_order_and_supports_reorder() {
+        let store = memory_store();
+        for text in ["甲", "乙", "丙"] {
+            store.insert_text(text).unwrap();
+        }
+        for text in ["甲", "乙", "丙"] {
+            store.toggle_pin(id_of(&store, text)).unwrap();
+        }
+
+        // 越晚收藏越靠前：丙、乙、甲
+        assert_eq!(contents(&store), ["丙", "乙", "甲"]);
+
+        // 把甲拖到丙前面 → 甲、丙、乙
+        store
+            .reorder_pinned(id_of(&store, "甲"), Some(id_of(&store, "丙")))
+            .unwrap();
+        assert_eq!(contents(&store), ["甲", "丙", "乙"]);
+
+        // 非收藏条目与组外目标均静默忽略
+        store.reorder_pinned(-1, None).unwrap();
+        assert_eq!(contents(&store), ["甲", "丙", "乙"]);
+    }
+
+    #[test]
+    fn recopying_pinned_item_keeps_manual_position() {
+        let store = memory_store();
+        store.insert_text("甲").unwrap();
+        store.insert_text("乙").unwrap();
+        store.toggle_pin(id_of(&store, "甲")).unwrap();
+        store.toggle_pin(id_of(&store, "乙")).unwrap();
+        store
+            .reorder_pinned(id_of(&store, "甲"), Some(id_of(&store, "乙")))
+            .unwrap();
+        assert_eq!(contents(&store), ["甲", "乙"]);
+
+        // 重复复制只刷新时间戳，收藏组的手动顺序不受影响
+        store.insert_text("乙").unwrap();
+        assert_eq!(contents(&store), ["甲", "乙"]);
     }
 }
