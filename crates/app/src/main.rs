@@ -21,12 +21,18 @@ use gpui_component::Root;
 use raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
 use tray_icon::{
     TrayIcon, TrayIconBuilder, TrayIconEvent,
-    menu::{Menu, MenuEvent, MenuItem},
+    menu::{CheckMenuItem, Menu, MenuEvent, MenuItem},
 };
 use windows::{
     Win32::{
-        Foundation::{ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND},
-        System::Threading::CreateMutexW,
+        Foundation::{ERROR_ALREADY_EXISTS, ERROR_SUCCESS, GetLastError, HANDLE, HWND},
+        System::{
+            Registry::{
+                HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, RegCloseKey, RegDeleteValueW,
+                RegGetValueW, RegOpenKeyExW, RegSetValueExW, REG_SZ, RRF_RT_REG_SZ,
+            },
+            Threading::CreateMutexW,
+        },
         UI::WindowsAndMessaging::{
             IsWindowVisible, SetForegroundWindow, ShowWindow, SW_HIDE, SW_SHOW,
         },
@@ -63,9 +69,10 @@ struct MainView(Entity<WispView>);
 
 impl Global for MainView {}
 
-/// 托盘与快捷键管理器的生命周期必须覆盖整个进程，挂在 Global 上防止 drop
+/// 托盘与快捷键管理器的生命周期必须覆盖整个进程，挂在 Global 上防止 drop；
+/// 托盘句柄运行期还要用来重建菜单（勾选态刷新）
 struct SystemIntegrations {
-    _tray: TrayIcon,
+    tray: TrayIcon,
     _hotkeys: GlobalHotKeyManager,
 }
 
@@ -150,6 +157,8 @@ enum ShellEvent {
     Show,
     /// 剪贴板有新条目入库
     ClipsChanged,
+    /// 切换开机自启（托盘菜单）
+    ToggleAutostart,
     Quit,
 }
 
@@ -167,6 +176,80 @@ impl SingleInstance {
         let handle = unsafe { CreateMutexW(None, false, w!("Local\\Wisp-SingleInstance")).ok()? };
         (unsafe { GetLastError() } != ERROR_ALREADY_EXISTS).then_some(Self { _handle: handle })
     }
+}
+
+// ==================== 开机自启 ====================
+
+/// 探测 HKCU Run 键是否已注册自启（只关心存在性，不取值）。
+fn autostart_enabled() -> bool {
+    let mut needed: u32 = 0;
+    unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run"),
+            w!("Wisp"),
+            RRF_RT_REG_SZ,
+            None,
+            None,
+            Some(&mut needed),
+        ) == ERROR_SUCCESS
+    }
+}
+
+/// 写入/删除自启键。路径带引号，防止含空格的路径被启动器截断。
+fn set_autostart(enabled: bool) -> bool {
+    use std::os::windows::ffi::OsStrExt as _;
+
+    // 先在安全代码里备好数据，注册表操作集中在 unsafe 块
+    let wide: Vec<u16> = if enabled {
+        let Ok(exe) = std::env::current_exe() else {
+            return false;
+        };
+        let text = format!("\"{}\"", exe.display());
+        let mut wide: Vec<u16> = std::ffi::OsStr::new(&text).encode_wide().collect();
+        wide.push(0); // REG_SZ 要求 NUL 结尾
+        wide
+    } else {
+        Vec::new()
+    };
+
+    unsafe {
+        let mut key = HKEY::default();
+        if RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run"),
+            None,
+            KEY_SET_VALUE,
+            &mut key,
+        ) != ERROR_SUCCESS
+        {
+            return false;
+        }
+
+        let result = if enabled {
+            let bytes =
+                std::slice::from_raw_parts(wide.as_ptr().cast::<u8>(), wide.len() * 2);
+            RegSetValueExW(key, w!("Wisp"), None, REG_SZ, Some(bytes))
+        } else {
+            RegDeleteValueW(key, w!("Wisp"))
+        };
+        _ = RegCloseKey(key);
+        result == ERROR_SUCCESS
+    }
+}
+
+/// 托盘菜单。勾选态取自注册表实况——切换后整体重建，绕开菜单项
+/// 不可跨线程持有的问题（muda 句柄是 Rc）。
+fn build_tray_menu(hotkey_label: &str) -> Menu {
+    let menu = Menu::new();
+    let toggle = MenuItem::with_id("toggle", format!("显示 / 隐藏（{hotkey_label}）"), true, None);
+    let autostart = CheckMenuItem::with_id("autostart", "开机自启", true, autostart_enabled(), None);
+    let quit = MenuItem::with_id("quit", "退出 Wisp", true, None);
+    menu.append(&toggle)
+        .and_then(|_| menu.append(&autostart))
+        .and_then(|_| menu.append(&quit))
+        .expect("托盘菜单构建失败");
+    menu
 }
 
 // ==================== 入口 ====================
@@ -218,26 +301,15 @@ fn main() {
             .expect("所有候选快捷键均注册失败");
         cx.set_global(WakeHotkey(hotkey_label));
 
-        let menu = Menu::new();
-        let toggle_item = MenuItem::with_id(
-            "toggle",
-            format!("显示 / 隐藏（{hotkey_label}）"),
-            true,
-            None,
-        );
-        let quit_item = MenuItem::with_id("quit", "退出 Wisp", true, None);
-        menu.append(&toggle_item).expect("托盘菜单构建失败");
-        menu.append(&quit_item).expect("托盘菜单构建失败");
-
         let tray = TrayIconBuilder::new()
             .with_tooltip(format!("Wisp — {hotkey_label} 唤起"))
             .with_icon(tray_icon_image())
-            .with_menu(Box::new(menu))
+            .with_menu(Box::new(build_tray_menu(hotkey_label)))
             .build()
             .expect("创建托盘图标失败");
 
         cx.set_global(SystemIntegrations {
-            _tray: tray,
+            tray,
             _hotkeys: hotkeys,
         });
 
@@ -287,6 +359,7 @@ fn main() {
             let event_tx = event_tx.clone();
             move |ev: MenuEvent| match ev.id.0.as_str() {
                 "toggle" => _ = event_tx.try_send(ShellEvent::Toggle),
+                "autostart" => _ = event_tx.try_send(ShellEvent::ToggleAutostart),
                 "quit" => _ = event_tx.try_send(ShellEvent::Quit),
                 _ => {}
             }
@@ -317,6 +390,16 @@ fn main() {
                         if let Some(main) = cx.try_global::<MainView>() {
                             let view = main.0.clone();
                             view.update(cx, |view, cx| view.reload_clips(cx));
+                        }
+                    }),
+                    ShellEvent::ToggleAutostart => _ = cx.update(|cx| {
+                        set_autostart(!autostart_enabled());
+                        // 菜单项句柄不可跨线程持有，重建整个菜单来刷新勾选态
+                        if let Some(sys) = cx.try_global::<SystemIntegrations>() {
+                            let label =
+                                cx.try_global::<WakeHotkey>().map_or("快捷键", |k| k.0);
+                            sys.tray
+                                .set_menu(Some(Box::new(build_tray_menu(label))));
                         }
                     }),
                     ShellEvent::Quit => {
