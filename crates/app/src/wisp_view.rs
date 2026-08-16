@@ -9,14 +9,13 @@ use gpui::{prelude::FluentBuilder as _, *};
 use gpui_component::{
     ActiveTheme as _, IconName, Sizable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
-    checkbox::Checkbox,
     h_flex, v_flex,
 };
 use wisp_core::{ClipboardService, MemoService};
 
 use crate::{
-    WakeHotkey, clipboard_view::ClipboardView, config::Config, hide_main_window,
-    home_view::{HomeView, OpenFeature}, memo_view::MemoView,
+    WakeHotkey, assets::WispIcon, clipboard_view::ClipboardView, config::Config,
+    hide_main_window, home_view::{HomeView, OpenFeature}, memo_view::MemoView,
 };
 
 /// 一级页面。上次所在页面会持久化，重启后原样恢复。
@@ -214,12 +213,23 @@ impl Render for WispView {
                             ),
                     )
                     .child(
+                        // 钉住 = 失焦不隐藏；未钉住（划掉）= 失焦自动隐藏
                         h_flex().occlude().child(
-                            Checkbox::new("auto-hide")
-                                .checked(self.auto_hide)
-                                .label("失焦自动隐藏")
-                                .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                                    this.auto_hide = *checked;
+                            Button::new("auto-hide")
+                                .ghost()
+                                .xsmall()
+                                .icon(if self.auto_hide {
+                                    WispIcon::PinOff
+                                } else {
+                                    WispIcon::Pin
+                                })
+                                .tooltip(if self.auto_hide {
+                                    "失焦自动隐藏中 · 点击钉住，失焦不隐藏"
+                                } else {
+                                    "已钉住，失焦不隐藏 · 点击恢复自动隐藏"
+                                })
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.auto_hide = !this.auto_hide;
                                     cx.notify();
                                 })),
                         ),

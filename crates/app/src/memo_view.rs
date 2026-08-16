@@ -3,7 +3,11 @@
 //! 两种形态共用一个视图——列表态浏览与检索，编辑态新建与修改，
 //! 由 [`MemoView::editor`] 是否存在切换。
 
-use std::{rc::Rc, sync::Arc};
+use std::{
+    rc::Rc,
+    sync::Arc,
+    time::Duration,
+};
 
 use gpui::{prelude::FluentBuilder as _, *};
 use gpui_component::{
@@ -12,6 +16,7 @@ use gpui_component::{
     h_flex,
     input::{Input, InputEvent, InputState, Textarea, TextareaState},
     scroll::{ScrollableElement as _, ScrollbarAxis},
+    tooltip::Tooltip,
     v_flex, v_virtual_list,
 };
 use wisp_core::{Memo, MemoDraft, MemoService, TagFilter, TagSummary, parse_tags};
@@ -21,6 +26,10 @@ use crate::{hide_main_window, paste_target};
 const ROW_HEIGHT: Pixels = px(56.);
 const ROW_WIDTH: Pixels = px(560.);
 const SIDEBAR_WIDTH: Pixels = px(140.);
+/// 悬停提示延迟：鼠标扫过列表时避免连续弹出
+const TOOLTIP_DELAY: Duration = Duration::from_millis(300);
+/// 悬停预览最多渲染的字符数，超出部分以尾注交代
+const TOOLTIP_PREVIEW_CHARS: usize = 500;
 
 /// 编辑态持有的三个输入框。取消编辑即整体丢弃，无需回滚。
 struct MemoEditor {
@@ -270,12 +279,7 @@ impl MemoView {
     fn render_row(&self, ix: usize, cx: &Context<Self>) -> Div {
         let memo = &self.items[ix];
         let active = ix == self.selected;
-        let footnote = match (memo.note.is_empty(), memo.tags.is_empty()) {
-            (true, true) => String::new(),
-            (false, true) => memo.note.clone(),
-            (true, false) => memo.tags.join(" · "),
-            (false, false) => format!("{} — {}", memo.note, memo.tags.join(" · ")),
-        };
+        let footnote = row_footnote(memo);
 
         v_flex()
             .w_full()
@@ -309,6 +313,34 @@ impl MemoView {
             )
     }
 
+    /// 渲染一个列表项：行 + 悬停预览 + 点击交付。
+    fn render_item(&self, ix: usize, cx: &Context<Self>) -> Stateful<Div> {
+        let memo = &self.items[ix];
+        let char_count = memo.content.chars().count() as i64;
+        let preview = tooltip_preview(&memo.content, char_count);
+        let mut footnote = row_footnote(memo);
+        if !footnote.is_empty() {
+            footnote.push_str(" · ");
+        }
+        footnote.push_str(&format!("共 {char_count} 字符"));
+
+        self.render_row(ix, cx)
+            .id(ix)
+            .tooltip_show_delay(TOOLTIP_DELAY)
+            .tooltip(move |window, cx| {
+                Tooltip::element({
+                    let preview = preview.clone();
+                    let footnote = footnote.clone();
+                    move |_, cx| memo_tooltip_body(preview.clone(), footnote.clone(), cx)
+                })
+                .build(window, cx)
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.selected = ix;
+                this.deliver_selected(true, cx);
+            }))
+    }
+
     fn render_list(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex_1()
@@ -330,12 +362,7 @@ impl MemoView {
                                             if ix >= this.items.len() {
                                                 return None;
                                             }
-                                            Some(this.render_row(ix, cx).id(ix).on_click(
-                                                cx.listener(move |this, _, _, cx| {
-                                                    this.selected = ix;
-                                                    this.deliver_selected(true, cx);
-                                                }),
-                                            ))
+                                            Some(this.render_item(ix, cx))
                                         })
                                         .collect()
                                 },
@@ -445,6 +472,53 @@ impl MemoView {
 
 fn style_active<E: Styled>(element: E, cx: &App) -> E {
     element.bg(cx.theme().accent)
+}
+
+/// 行内小字与悬停尾注共用：备注在前、标签在后，空段自动省略。
+fn row_footnote(memo: &Memo) -> String {
+    match (memo.note.is_empty(), memo.tags.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => memo.note.clone(),
+        (true, false) => memo.tags.join(" · "),
+        (false, false) => format!("{} — {}", memo.note, memo.tags.join(" · ")),
+    }
+}
+
+/// 悬停预览正文：保留换行截断至 TOOLTIP_PREVIEW_CHARS 字符，超出补省略号。
+fn tooltip_preview(content: &str, char_count: i64) -> String {
+    let mut preview: String = content.chars().take(TOOLTIP_PREVIEW_CHARS).collect();
+    if char_count as usize > TOOLTIP_PREVIEW_CHARS {
+        preview.push('…');
+    }
+    preview
+}
+
+/// 悬停提示正文：截断预览 + 备注/标签/总字符数尾注。
+///
+/// 换行用逐行子元素保留（此版 gpui 的 WhiteSpace 无 pre-wrap），
+/// 空行以空格占位维持行高。
+fn memo_tooltip_body(preview: String, footnote: String, cx: &App) -> Div {
+    v_flex()
+        .max_w(px(480.))
+        .py_1()
+        .gap_1()
+        .child(
+            v_flex()
+                .min_w(px(320.))
+                .max_h(px(320.))
+                .overflow_hidden()
+                .text_sm()
+                .line_height(relative(1.5))
+                .children(preview.lines().map(|line| {
+                    div().child(if line.is_empty() { " ".to_string() } else { line.to_string() })
+                })),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(footnote),
+        )
 }
 
 impl Render for MemoView {

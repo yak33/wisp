@@ -17,6 +17,34 @@
 
 ---
 
+## 补丁 · 失焦隐藏改钉子图标 — 2026/08/16
+
+头部的「失焦自动隐藏」复选框换成钉子图标按钮（钉住 = 失焦不隐藏，
+划掉 = 失焦自动隐藏），语义对齐主流应用的置顶钉，标题栏更轻。
+
+- [x] gpui-component 无 pin 图标：自有 SVG 经 `include_bytes!` 内嵌，
+      `WispAssets` 实现 `AssetSource`（先查自有、回落 gpui-component-assets），
+      `WispIcon` 实现 `IconNamed` 借三层 blanket impl 直通 `Button::icon`，零新依赖
+- [x] 状态与提示随 `auto_hide` 联动，悬停说明当前行为与点击效果
+- [x] 按钮保留拖动区内的 `.occlude()` 包裹（否则点击被 HTCAPTION 吞掉）
+
+---
+
+## 补丁 · 列表悬停预览 — 2026/08/16
+
+长内容在行内只有单行摘要，鼠标悬停 300ms 弹出预览：保留换行截断 500 字符，
+尾注交代总字符数（剪贴板）/ 备注·标签·总字符数（备忘）。截断预览在行渲染时
+`chars().take(500)` 惰性求值，超大条目（上限 2MB）不产生额外开销；完整内容
+查看留给后续的详情层。
+
+- [x] gpui 原生 `StatefulInteractiveElement::tooltip` + `tooltip_show_delay`，
+  内容经 gpui-component `Tooltip::element` 获得统一样式（popover 底/边框/阴影）
+- [x] 换行用逐行子元素保留——此版 gpui 的 `WhiteSpace` 只有 Normal/Nowrap，
+  无 pre-wrap；空行以空格占位维持行高
+- [x] 两视图各抽 `render_item`（行 + 悬停 + 点击），虚拟列表闭包回归清爽
+
+---
+
 ## 补丁 · 记住上次页面 + 剪贴板分类 — 2026/08/16
 
 M4.5 的两处修正：页面记忆跨重启生效；图像/文件从主页网格撤下——

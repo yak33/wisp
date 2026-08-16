@@ -3,7 +3,7 @@
 use std::{
     rc::Rc,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use gpui::{prelude::FluentBuilder as _, *};
@@ -12,6 +12,7 @@ use gpui_component::{
     h_flex,
     input::{Input, InputEvent, InputState},
     scroll::{ScrollableElement as _, ScrollbarAxis},
+    tooltip::Tooltip,
     v_flex, v_virtual_list,
 };
 use wisp_core::{Clip, ClipFilter, ClipboardService};
@@ -21,6 +22,11 @@ use crate::{hide_main_window, paste_target};
 const ROW_HEIGHT: Pixels = px(40.);
 const ROW_WIDTH: Pixels = px(700.);
 const QUERY_LIMIT: usize = 500;
+/// 悬停提示延迟：鼠标扫过列表时避免连续弹出
+const TOOLTIP_DELAY: Duration = Duration::from_millis(300);
+/// 悬停预览最多渲染的字符数。单条入库上限 2MB，正文只渲染截断预览，
+/// 完整长度由尾注交代，防止超大内容卡住渲染。
+const TOOLTIP_PREVIEW_CHARS: usize = 500;
 
 pub(crate) struct ClipboardView {
     service: Arc<ClipboardService>,
@@ -180,6 +186,28 @@ impl ClipboardView {
             )
     }
 
+    /// 渲染一个列表项：行 + 悬停预览 + 点击交付。
+    fn render_item(&self, ix: usize, cx: &Context<Self>) -> Stateful<Div> {
+        let clip = &self.items[ix];
+        let preview = tooltip_preview(&clip.content, clip.char_count);
+        let char_count = clip.char_count;
+
+        self.render_row(ix, cx)
+            .id(ix)
+            .tooltip_show_delay(TOOLTIP_DELAY)
+            .tooltip(move |window, cx| {
+                Tooltip::element({
+                    let preview = preview.clone();
+                    move |_, cx| clip_tooltip_body(preview.clone(), char_count, cx)
+                })
+                .build(window, cx)
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.selected = ix;
+                this.deliver_selected(true, cx);
+            }))
+    }
+
     /// 分类标签行：全部 / 文本 / 图像 / 文件 / 收藏（Alt+1~5 等效）
     fn render_filter_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         h_flex()
@@ -271,12 +299,7 @@ impl Render for ClipboardView {
                                                         if ix >= this.items.len() {
                                                             return None;
                                                         }
-                                                        Some(this.render_row(ix, cx).id(ix).on_click(
-                                                            cx.listener(move |this, _, _, cx| {
-                                                                this.selected = ix;
-                                                                this.deliver_selected(true, cx);
-                                                            }),
-                                                        ))
+                                                        Some(this.render_item(ix, cx))
                                                     })
                                                     .collect()
                                             },
@@ -289,6 +312,43 @@ impl Render for ClipboardView {
                     }),
             )
     }
+}
+
+/// 悬停预览正文：保留换行截断至 TOOLTIP_PREVIEW_CHARS 字符，超出补省略号。
+fn tooltip_preview(content: &str, char_count: i64) -> String {
+    let mut preview: String = content.chars().take(TOOLTIP_PREVIEW_CHARS).collect();
+    if char_count as usize > TOOLTIP_PREVIEW_CHARS {
+        preview.push('…');
+    }
+    preview
+}
+
+/// 悬停提示正文：截断预览 + 总字符数尾注。
+///
+/// 换行用逐行子元素保留（此版 gpui 的 WhiteSpace 无 pre-wrap），
+/// 空行以空格占位维持行高。
+fn clip_tooltip_body(preview: String, char_count: i64, cx: &App) -> Div {
+    v_flex()
+        .max_w(px(480.))
+        .py_1()
+        .gap_1()
+        .child(
+            v_flex()
+                .min_w(px(320.))
+                .max_h(px(320.))
+                .overflow_hidden()
+                .text_sm()
+                .line_height(relative(1.5))
+                .children(preview.lines().map(|line| {
+                    div().child(if line.is_empty() { " ".to_string() } else { line.to_string() })
+                })),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(format!("共 {char_count} 字符")),
+        )
 }
 
 fn relative_time(created_at_ms: i64) -> String {

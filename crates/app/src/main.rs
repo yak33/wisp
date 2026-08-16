@@ -3,6 +3,7 @@
 //! 交互约定：全局快捷键显隐（Alt+Space 被占用时自动降级）；
 //! Esc 或失焦隐藏；托盘双击唤起，右键菜单退出。
 
+mod assets;
 mod clipboard_view;
 mod config;
 mod home_view;
@@ -17,7 +18,6 @@ use global_hotkey::{
 };
 use gpui::*;
 use gpui_component::Root;
-use gpui_component_assets::Assets;
 use raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
 use tray_icon::{
     TrayIcon, TrayIconBuilder, TrayIconEvent,
@@ -28,6 +28,8 @@ use windows::Win32::{
     UI::WindowsAndMessaging::{IsWindowVisible, SetForegroundWindow, ShowWindow, SW_HIDE, SW_SHOW},
 };
 use wisp_core::{ClipboardService, MemoService};
+
+use crate::assets::WispAssets;
 
 use crate::{config::Config, wisp_view::WispView};
 
@@ -133,7 +135,7 @@ fn db_path() -> PathBuf {
 }
 
 fn main() {
-    let app = gpui_platform::application().with_assets(Assets);
+    let app = gpui_platform::application().with_assets(WispAssets::new());
 
     app.run(move |cx| {
         gpui_component::init(cx);
