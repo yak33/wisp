@@ -22,4 +22,5 @@ tray-icon.workspace = true
 windows.workspace = true
 
 anyhow.workspace = true
+async-channel.workspace = true
 crossbeam-channel.workspace = true

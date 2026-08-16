@@ -34,6 +34,8 @@ impl ClipboardService {
                 .with_context(|| format!("创建数据目录失败: {}", dir.display()))?;
         }
         let store = Arc::new(ClipStore::open(db_path)?);
+        // 启动即清理一次：长期常驻的进程不能只靠入库触发
+        store.prune();
 
         let (clipboard_tx, clipboard_rx) = crossbeam_channel::unbounded::<()>();
         let watcher = watcher::start(clipboard_tx)?;
@@ -51,6 +53,7 @@ impl ClipboardService {
                         continue;
                     }
                     if worker_store.insert_text(&text).is_ok() {
+                        worker_store.prune();
                         _ = changed_tx.try_send(());
                     }
                 }

@@ -66,6 +66,8 @@ impl MemoView {
             |this: &mut Self, state, ev, _, cx| match ev {
                 InputEvent::Change => {
                     this.keyword = state.read(cx).value().to_string();
+                    // 搜索即重选首条，与剪贴板视图一致
+                    this.selected = 0;
                     this.reload(cx);
                 }
                 InputEvent::PressEnter { secondary, .. } => this.deliver_selected(!secondary, cx),
@@ -523,8 +525,6 @@ fn memo_tooltip_body(preview: String, footnote: String, cx: &App) -> Div {
 
 impl Render for MemoView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let editing = self.is_editing();
-
         v_flex()
             .size_full()
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
@@ -585,6 +585,5 @@ impl Render for MemoView {
                     )
                     .child(self.render_toolbar(cx)),
             })
-            .when(editing, |body| body)
     }
 }

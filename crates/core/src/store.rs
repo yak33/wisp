@@ -6,13 +6,18 @@
 use std::{
     path::Path,
     sync::Mutex,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context as _, Result};
 use rusqlite::{Connection, params, params_from_iter};
 
 use crate::clip::{Clip, ClipFilter, ClipKind, fingerprint, make_preview};
+
+/// 过期条目的保留时长。置顶（收藏）豁免——用户明确留下的内容不做静默清理。
+const RETENTION_MS: i64 = 90 * 24 * 3600 * 1000;
+/// 未置顶条目的总量上限，超出时最旧的先走。M3 图像入库前的护栏。
+const MAX_ROWS: usize = 2000;
 
 pub(crate) struct ClipStore {
     conn: Mutex<Connection>,
@@ -25,6 +30,7 @@ impl ClipStore {
 
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
+        conn.busy_timeout(Duration::from_millis(2000))?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS clips (
                 id         INTEGER PRIMARY KEY,
@@ -140,9 +146,38 @@ impl ClipStore {
         conn.execute("DELETE FROM clips WHERE id = ?1", params![id])?;
         Ok(())
     }
+
+    /// 例行清理：过期未置顶条目先走，再把未置顶总量压回上限。
+    /// 启动与每次入库后各跑一次；失败静默——清理只是护栏不是关键路径。
+    pub(crate) fn prune(&self) {
+        let _ = self.prune_before(now_ms() - RETENTION_MS);
+        let _ = self.enforce_cap(MAX_ROWS);
+    }
+
+    /// 删除早于 `cutoff_ms` 的未置顶条目，返回删除行数。
+    fn prune_before(&self, cutoff_ms: i64) -> Result<usize> {
+        let conn = self.conn.lock().expect("clip store poisoned");
+        Ok(conn.execute(
+            "DELETE FROM clips WHERE pinned = 0 AND created_at < ?1",
+            params![cutoff_ms],
+        )?)
+    }
+
+    /// 未置顶总量压回 `keep` 条（按时间新旧保留），置顶豁免，返回删除行数。
+    fn enforce_cap(&self, keep: usize) -> Result<usize> {
+        let conn = self.conn.lock().expect("clip store poisoned");
+        Ok(conn.execute(
+            "DELETE FROM clips WHERE pinned = 0 AND id NOT IN (
+                 SELECT id FROM clips WHERE pinned = 0
+                 ORDER BY created_at DESC, id DESC LIMIT ?1
+             )",
+            params![keep as i64],
+        )?)
+    }
 }
 
-fn escape_like(keyword: &str) -> String {
+/// LIKE 模式中的通配符按字面匹配（`%`/`_`/`\`），配合 `ESCAPE '\\'` 使用。
+pub(crate) fn escape_like(keyword: &str) -> String {
     keyword
         .replace('\\', "\\\\")
         .replace('%', "\\%")
@@ -233,5 +268,42 @@ mod tests {
         // 文本分类命中全部文本条目；图像分类暂为空（M3 落地后自动出现）
         assert_eq!(store.query(ClipFilter::Text, "", 10).unwrap().len(), 2);
         assert!(store.query(ClipFilter::Image, "", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn prune_removes_stale_unpinned_but_keeps_pinned() {
+        let store = memory_store();
+        store.insert_text("过期的普通").unwrap();
+        store.insert_text("过期的置顶").unwrap();
+        let pinned_id = store.query(ClipFilter::All, "置顶", 1).unwrap()[0].id;
+        store.toggle_pin(pinned_id).unwrap();
+
+        // 以未来时刻为界：所有现存条目都算过期
+        let removed = store.prune_before(now_ms() + 1000).unwrap();
+        assert_eq!(removed, 1);
+
+        let clips = store.query(ClipFilter::All, "", 10).unwrap();
+        assert_eq!(clips.len(), 1);
+        assert_eq!(clips[0].content, "过期的置顶");
+    }
+
+    #[test]
+    fn enforce_cap_keeps_newest_unpinned_and_all_pinned() {
+        let store = memory_store();
+        store.insert_text("第一条").unwrap();
+        store.insert_text("第二条").unwrap();
+        store.insert_text("第三条").unwrap();
+        let pinned_id = store.query(ClipFilter::All, "第一条", 1).unwrap()[0].id;
+        store.toggle_pin(pinned_id).unwrap();
+        store.insert_text("第四条").unwrap();
+
+        let removed = store.enforce_cap(2).unwrap();
+        assert_eq!(removed, 1);
+
+        let clips = store.query(ClipFilter::All, "", 10).unwrap();
+        let mut kept: Vec<&str> = clips.iter().map(|clip| clip.content.as_str()).collect();
+        kept.sort_unstable();
+        // 置顶的第一条豁免；未置顶保留最新的两条（同毫秒按 id 兜底，最旧的是第二条）
+        assert_eq!(kept, vec!["第一条", "第三条", "第四条"]);
     }
 }

@@ -8692,6 +8692,7 @@ name = "wisp-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-channel",
  "crossbeam-channel",
  "global-hotkey",
  "gpui",

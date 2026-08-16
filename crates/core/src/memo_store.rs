@@ -3,7 +3,11 @@
 //! 与剪贴板共用同一个 SQLite 文件（WAL 模式下多连接读写安全），
 //! 但表与连接彼此独立，两个功能互不阻塞。
 
-use std::{path::Path, sync::Mutex};
+use std::{
+    path::Path,
+    sync::Mutex,
+    time::Duration,
+};
 
 use anyhow::{Context as _, Result};
 use rusqlite::{Connection, params, params_from_iter};
@@ -11,7 +15,7 @@ use rusqlite::{Connection, params, params_from_iter};
 use crate::{
     clip::make_preview,
     memo::{Memo, MemoDraft, TagFilter, TagSummary},
-    store::now_ms,
+    store::{escape_like, now_ms},
 };
 
 pub(crate) struct MemoStore {
@@ -25,6 +29,7 @@ impl MemoStore {
 
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
+        conn.busy_timeout(Duration::from_millis(2000))?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS memos (
@@ -202,13 +207,6 @@ impl MemoStore {
             |row| row.get(0),
         )?)
     }
-}
-
-fn escape_like(keyword: &str) -> String {
-    keyword
-        .replace('\\', "\\\\")
-        .replace('%', "\\%")
-        .replace('_', "\\_")
 }
 
 #[cfg(test)]

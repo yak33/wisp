@@ -24,6 +24,7 @@ tray-icon = "0.21"
 
 # 基础设施
 anyhow = "1"
+async-channel = "2"
 crossbeam-channel = "0.5"
 
 [workspace.dependencies.windows]
@@ -33,6 +34,7 @@ features = [
     "Win32_Graphics_Gdi",
     "Win32_System_DataExchange",
     "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ]
