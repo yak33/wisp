@@ -21,7 +21,10 @@ use gpui_component::{
 };
 use wisp_core::{Memo, MemoDraft, MemoService, TagFilter, TagSummary, parse_tags};
 
-use crate::{hide_main_window, paste_target, ui::kbd_pill};
+use crate::{
+    hide_main_window, paste_target,
+    ui::{brand, kbd_pill},
+};
 
 const ROW_HEIGHT: Pixels = px(56.);
 const ROW_WIDTH: Pixels = px(560.);
@@ -319,7 +322,7 @@ impl MemoView {
                     .w(px(3.))
                     .h(px(24.))
                     .rounded_full()
-                    .when(active, |bar| bar.bg(rgb(0x6C5CE7)))
+                    .when(active, |bar| bar.bg(brand(cx)))
                     .when(!active, |bar| bar.opacity(0.)),
             )
             .child(

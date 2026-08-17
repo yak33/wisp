@@ -10,7 +10,7 @@ use gpui_component::{
     v_flex,
 };
 
-use crate::ui::kbd_pill;
+use crate::ui::{brand, kbd_pill, tint};
 
 /// 主页发出的"打开功能页"请求，由根视图订阅并完成切换。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,7 +160,7 @@ impl HomeView {
             .bg(cx.theme().secondary.opacity(0.45))
             .border_1()
             .when(enabled && selected, |card| {
-                card.border_color(rgb(0x6C5CE7))
+                card.border_color(brand(cx))
                     .bg(cx.theme().accent.opacity(0.75))
             })
             .when(!selected, |card| {
@@ -182,8 +182,8 @@ impl HomeView {
                         div()
                             .size(px(36.))
                             .rounded_lg()
-                            .bg(rgb(feature.tint).opacity(0.15))
-                            .text_color(rgb(feature.tint))
+                            .bg(tint(feature.tint, cx).opacity(0.15))
+                            .text_color(tint(feature.tint, cx))
                             .flex()
                             .items_center()
                             .justify_center()

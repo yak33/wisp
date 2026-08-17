@@ -7,16 +7,16 @@ mod assets;
 mod clipboard_view;
 mod config;
 mod home_view;
+mod hotkey;
 mod memo_view;
+mod settings_view;
+mod theme;
 mod ui;
 mod wisp_view;
 
 use std::{path::PathBuf, sync::Arc};
 
-use global_hotkey::{
-    GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
-    hotkey::{Code, HotKey, Modifiers},
-};
+use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
 use gpui::*;
 use gpui_component::Root;
 use raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
@@ -55,8 +55,12 @@ struct NativeWindow(isize);
 
 impl Global for NativeWindow {}
 
-/// 实际注册成功的唤起快捷键标签（Alt+Space 可能被 uTools 等占用而降级）
-pub(crate) struct WakeHotkey(pub &'static str);
+/// 当前生效的唤起快捷键。标签同时是落盘串与解析输入（`HotKey: FromStr`
+/// 的词法与此处拼法一致），换绑时需持有 `HotKey` 本体来注销旧键。
+pub(crate) struct WakeHotkey {
+    pub hotkey: HotKey,
+    pub label: String,
+}
 
 impl Global for WakeHotkey {}
 
@@ -71,10 +75,11 @@ struct MainView(Entity<WispView>);
 impl Global for MainView {}
 
 /// 托盘与快捷键管理器的生命周期必须覆盖整个进程，挂在 Global 上防止 drop；
-/// 托盘句柄运行期还要用来重建菜单（勾选态刷新）
-struct SystemIntegrations {
-    tray: TrayIcon,
-    _hotkeys: GlobalHotKeyManager,
+/// 托盘句柄运行期还要用来重建菜单（勾选态刷新）与切换可见性，
+/// 快捷键管理器用来在设置页换绑时注销旧键、注册新键。
+pub(crate) struct SystemIntegrations {
+    pub tray: TrayIcon,
+    pub hotkeys: GlobalHotKeyManager,
 }
 
 impl Global for SystemIntegrations {}
@@ -182,7 +187,7 @@ impl SingleInstance {
 // ==================== 开机自启 ====================
 
 /// 探测 HKCU Run 键是否已注册自启（只关心存在性，不取值）。
-fn autostart_enabled() -> bool {
+pub(crate) fn autostart_enabled() -> bool {
     let mut needed: u32 = 0;
     unsafe {
         RegGetValueW(
@@ -198,7 +203,7 @@ fn autostart_enabled() -> bool {
 }
 
 /// 写入/删除自启键。路径带引号，防止含空格的路径被启动器截断。
-fn set_autostart(enabled: bool) -> bool {
+pub(crate) fn set_autostart(enabled: bool) -> bool {
     use std::os::windows::ffi::OsStrExt as _;
 
     // 先在安全代码里备好数据，注册表操作集中在 unsafe 块
@@ -253,6 +258,82 @@ fn build_tray_menu(hotkey_label: &str) -> Menu {
     menu
 }
 
+// ==================== 壳层操作（设置页 / 事件泵共用） ====================
+
+/// 按当前全局态重建托盘菜单与悬浮提示。自启勾选态、快捷键标签变更后调用。
+pub(crate) fn refresh_tray(cx: &App) {
+    let Some(sys) = cx.try_global::<SystemIntegrations>() else {
+        return;
+    };
+    let label = cx
+        .try_global::<WakeHotkey>()
+        .map_or("快捷键", |k| k.label.as_str());
+    sys.tray.set_menu(Some(Box::new(build_tray_menu(label))));
+    _ = sys.tray.set_tooltip(Some(format!("Wisp — {label} 唤起")));
+}
+
+/// 托盘图标显隐。隐藏后唤起全靠快捷键，设置页入口有对应保险提示。
+pub(crate) fn set_tray_visible(visible: bool, cx: &App) {
+    if let Some(sys) = cx.try_global::<SystemIntegrations>() {
+        _ = sys.tray.set_visible(visible);
+    }
+}
+
+/// 临时注销当前唤起键（录制新键期间，防止按到旧键触发显隐）。
+pub(crate) fn suspend_wake_hotkey(cx: &App) {
+    if let (Some(sys), Some(wake)) = (
+        cx.try_global::<SystemIntegrations>(),
+        cx.try_global::<WakeHotkey>(),
+    ) {
+        _ = sys.hotkeys.unregister(wake.hotkey);
+    }
+}
+
+/// 恢复被 [`suspend_wake_hotkey`] 注销的唤起键（录制取消时）。
+pub(crate) fn resume_wake_hotkey(cx: &App) {
+    if let (Some(sys), Some(wake)) = (
+        cx.try_global::<SystemIntegrations>(),
+        cx.try_global::<WakeHotkey>(),
+    ) {
+        _ = sys.hotkeys.register(wake.hotkey);
+    }
+}
+
+/// 换绑唤起键：注销旧键 → 注册新键；失败则回滚重注册旧键。
+/// 成功后更新全局、落盘并刷新托盘文案。旧键已被挂起时注销是无害空操作。
+pub(crate) fn rebind_wake_hotkey(label: &str, cx: &mut App) -> Result<(), &'static str> {
+    let parsed = hotkey::parse(label).ok_or("无法解析该组合")?;
+    let (old_hotkey, unchanged) = match cx.try_global::<WakeHotkey>() {
+        Some(wake) => (Some(wake.hotkey), wake.label == label),
+        None => (None, false),
+    };
+    if unchanged {
+        return Ok(());
+    }
+
+    let Some(sys) = cx.try_global::<SystemIntegrations>() else {
+        return Err("系统集成未就绪");
+    };
+    if let Some(old) = old_hotkey {
+        _ = sys.hotkeys.unregister(old);
+    }
+    if sys.hotkeys.register(parsed).is_err() {
+        // 新键被其他程序占了——把旧键抢回来，保证应用始终可唤起
+        if let Some(old) = old_hotkey {
+            _ = sys.hotkeys.register(old);
+        }
+        return Err("该组合已被其他程序占用");
+    }
+
+    cx.set_global(WakeHotkey {
+        hotkey: parsed,
+        label: label.to_owned(),
+    });
+    config::set("hotkey", label, cx);
+    refresh_tray(cx);
+    Ok(())
+}
+
 // ==================== 入口 ====================
 
 fn db_path() -> PathBuf {
@@ -285,34 +366,34 @@ fn main() {
         // 与数据库同目录的轻量配置（上次页面等），进程重启后恢复
         let config = Config::load(&db_path.with_file_name("wisp.cfg"));
 
-        // Alt+Space 大概率被 uTools 等工具占用，按候选顺序降级注册
+        // 先试用户自选键；未设置或已被其他软件占用时，走默认候选降级链
         let hotkeys = GlobalHotKeyManager::new().expect("初始化全局快捷键失败");
-        let candidates = [
-            (HotKey::new(Some(Modifiers::ALT), Code::Space), "Alt+Space"),
-            (
-                HotKey::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::Space),
-                "Ctrl+Alt+Space",
-            ),
-            (HotKey::new(Some(Modifiers::ALT), Code::Backquote), "Alt+`"),
-        ];
-        let hotkey_label = candidates
-            .iter()
-            .find(|(hotkey, _)| hotkeys.register(*hotkey).is_ok())
-            .map(|(_, label)| *label)
+        let (hotkey, hotkey_label) = config
+            .get("hotkey")
+            .into_iter()
+            .chain(hotkey::DEFAULT_CANDIDATES)
+            .filter_map(|label| hotkey::parse(label).map(|parsed| (parsed, label.to_owned())))
+            .find(|(parsed, _)| hotkeys.register(*parsed).is_ok())
             .expect("所有候选快捷键均注册失败");
-        cx.set_global(WakeHotkey(hotkey_label));
+        cx.set_global(WakeHotkey {
+            hotkey,
+            label: hotkey_label.clone(),
+        });
 
         let tray = TrayIconBuilder::new()
             .with_tooltip(format!("Wisp — {hotkey_label} 唤起"))
             .with_icon(tray_icon_image())
-            .with_menu(Box::new(build_tray_menu(hotkey_label)))
+            .with_menu(Box::new(build_tray_menu(&hotkey_label)))
             .build()
             .expect("创建托盘图标失败");
+        // 上次设置了隐藏托盘则开局即隐藏；此时快捷键必已注册成功（否则前面已 panic）
+        if config.get("hide_tray") == Some("1") {
+            _ = tray.set_visible(false);
+        }
 
-        cx.set_global(SystemIntegrations {
-            tray,
-            _hotkeys: hotkeys,
-        });
+        cx.set_global(SystemIntegrations { tray, hotkeys });
+        // 配置转为全局单实例：标题栏 / 设置页 / 根视图共享同一份，避免副本互相覆盖
+        cx.set_global(config);
 
         let window_options = WindowOptions {
             titlebar: None,
@@ -335,7 +416,6 @@ fn main() {
                     WispView::new(
                         Arc::clone(&clipboard_service),
                         Arc::clone(&memo_service),
-                        config,
                         window,
                         cx,
                     )
@@ -399,12 +479,7 @@ fn main() {
                     ShellEvent::ToggleAutostart => _ = cx.update(|cx| {
                         set_autostart(!autostart_enabled());
                         // 菜单项句柄不可跨线程持有，重建整个菜单来刷新勾选态
-                        if let Some(sys) = cx.try_global::<SystemIntegrations>() {
-                            let label =
-                                cx.try_global::<WakeHotkey>().map_or("快捷键", |k| k.0);
-                            sys.tray
-                                .set_menu(Some(Box::new(build_tray_menu(label))));
-                        }
+                        refresh_tray(cx);
                     }),
                     ShellEvent::Quit => {
                         _ = cx.update(|cx| cx.quit());

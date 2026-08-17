@@ -1,7 +1,9 @@
 //! 应用自有资源：在 gpui-component-assets 之上叠加本地图标。
 //!
-//! gpui-component 未收录 pin 图标，这里以 lucide 同款格式内嵌两个 SVG，
-//! 经 [`WispIcon`] 实现 [`IconNamed`] 接入 `Button::icon` 等组件体系。
+//! gpui-component 未收录 pin 与「跟随系统」图标，这里以 lucide 同款格式内嵌
+//! SVG（24 画布 / stroke-width 2），经 [`WispIcon`] 实现 [`IconNamed`] 接入
+//! `Button::icon` 等组件体系。gpui 把 SVG 当单色 alpha 蒙版光栅化后整体着色，
+//! 故图标内的 fill/stroke 取值不影响最终颜色，只有覆盖区域参与渲染。
 
 use std::borrow::Cow;
 
@@ -33,13 +35,21 @@ impl AssetSource for WispAssets {
             "icons/logo.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
                 "../assets/icons/logo.svg"
             ) as &[u8]))),
+            "icons/theme-system.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/icons/theme-system.svg"
+            ) as &[u8]))),
             _ => self.base.load(path),
         }
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         let mut entries = self.base.list(path)?;
-        for name in ["icons/pin.svg", "icons/pin-off.svg", "icons/logo.svg"] {
+        for name in [
+            "icons/pin.svg",
+            "icons/pin-off.svg",
+            "icons/logo.svg",
+            "icons/theme-system.svg",
+        ] {
             if name.starts_with(path) {
                 entries.push(name.into());
             }
@@ -57,6 +67,8 @@ pub(crate) enum WispIcon {
     PinOff,
     /// 轻烟精灵本体（窗口标题旁的品牌图形）
     Logo,
+    /// 主题跟随系统（圆环半实心，明暗各半）
+    ThemeSystem,
 }
 
 impl IconNamed for WispIcon {
@@ -65,6 +77,7 @@ impl IconNamed for WispIcon {
             Self::Pin => "icons/pin.svg".into(),
             Self::PinOff => "icons/pin-off.svg".into(),
             Self::Logo => "icons/logo.svg".into(),
+            Self::ThemeSystem => "icons/theme-system.svg".into(),
         }
     }
 }

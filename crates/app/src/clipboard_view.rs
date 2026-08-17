@@ -21,7 +21,10 @@ use gpui_component::{
 };
 use wisp_core::{Clip, ClipFilter, ClipKind, ClipboardService};
 
-use crate::{hide_main_window, paste_target, ui::kbd_pill};
+use crate::{
+    hide_main_window, paste_target,
+    ui::{brand, kbd_pill, warning},
+};
 
 const ROW_HEIGHT: Pixels = px(40.);
 const ROW_WIDTH: Pixels = px(700.);
@@ -280,7 +283,7 @@ impl ClipboardView {
                     .w(px(3.))
                     .h(px(16.))
                     .rounded_full()
-                    .when(is_selected, |bar| bar.bg(rgb(0x6C5CE7)))
+                    .when(is_selected, |bar| bar.bg(brand(cx)))
                     .when(!is_selected, |bar| bar.opacity(0.)),
             )
             .when(is_image, |row| {
@@ -318,8 +321,8 @@ impl ClipboardView {
                         .py_0p5()
                         .rounded(px(4.))
                         .text_xs()
-                        .bg(rgb(0xF59E0B).opacity(0.15))
-                        .text_color(rgb(0xF59E0B))
+                        .bg(warning(cx).opacity(0.15))
+                        .text_color(warning(cx))
                         .child("置顶"),
                 )
             })
@@ -500,7 +503,7 @@ impl ClipboardView {
                             .rounded(px(4.))
                             .text_xs()
                             .font_medium()
-                            .bg(rgb(0x6C5CE7))
+                            .bg(brand(cx))
                             .text_color(white())
                             .child(format!("已选 {count} 项")),
                     )
