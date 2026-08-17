@@ -10,7 +10,7 @@ use std::{
 
 use gpui::{prelude::FluentBuilder as _, *};
 use gpui_component::{
-    ActiveTheme as _, Sizable as _, VirtualListScrollHandle,
+    ActiveTheme as _, Sizable as _, StyledExt as _, VirtualListScrollHandle,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputEvent, InputState},
@@ -21,7 +21,10 @@ use gpui_component::{
 };
 use wisp_core::{Clip, ClipFilter, ClipKind, ClipboardService};
 
-use crate::{hide_main_window, paste_target};
+use crate::{
+    hide_main_window, paste_target,
+    ui::{brand, kbd_pill, warning},
+};
 
 const ROW_HEIGHT: Pixels = px(40.);
 const ROW_WIDTH: Pixels = px(700.);
@@ -263,25 +266,36 @@ impl ClipboardView {
             .w_full()
             .h(ROW_HEIGHT)
             .px_3()
-            .gap_3()
+            .gap_2p5()
             .items_center()
             .border_b_1()
-            .border_color(cx.theme().border.opacity(0.4))
-            .when(is_selected, |style| style.bg(cx.theme().accent))
+            .border_color(cx.theme().border.opacity(0.3))
+            .when(is_selected, |style| style.bg(cx.theme().accent.opacity(0.85)))
             .when(!is_selected && in_set, |style| {
                 style.bg(cx.theme().accent.opacity(0.5))
             })
             .when(!is_selected && !in_set, |style| {
                 style.hover(|style| style.bg(cx.theme().accent.opacity(0.3)))
             })
+            // 左侧发光 Accent 导轨指示条
+            .child(
+                div()
+                    .w(px(3.))
+                    .h(px(16.))
+                    .rounded_full()
+                    .when(is_selected, |bar| bar.bg(brand(cx)))
+                    .when(!is_selected, |bar| bar.opacity(0.)),
+            )
             .when(is_image, |row| {
-                // 缩略图：28px 定高，object_fit Contain 保比例
+                // 缩略图：28px 定高，object_fit Contain 保比例 + 微边框
                 row.child(
                     div()
                         .flex_none()
                         .h(px(28.))
                         .w(px(28.))
-                        .rounded_sm()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(cx.theme().border.opacity(0.4))
                         .overflow_hidden()
                         .when_some(self.thumb_image(clip.id, clip.thumb.as_deref()), |cell, image| {
                             cell.child(img(image).size_full())
@@ -293,17 +307,22 @@ impl ClipboardView {
                     div()
                         .px_1p5()
                         .py_0p5()
-                        .rounded_sm()
+                        .rounded(px(4.))
                         .text_xs()
-                        .bg(cx.theme().secondary)
+                        .text_color(cx.theme().muted_foreground)
+                        .bg(cx.theme().secondary.opacity(0.6))
                         .child(clip.kind.label()),
                 )
             })
             .when(clip.pinned, |row| {
                 row.child(
                     div()
+                        .px_1p5()
+                        .py_0p5()
+                        .rounded(px(4.))
                         .text_xs()
-                        .text_color(cx.theme().muted_foreground)
+                        .bg(warning(cx).opacity(0.15))
+                        .text_color(warning(cx))
                         .child("置顶"),
                 )
             })
@@ -312,6 +331,7 @@ impl ClipboardView {
                     .flex_1()
                     .overflow_hidden()
                     .text_sm()
+                    .font_medium()
                     .whitespace_nowrap()
                     .text_ellipsis()
                     // 文本行为首行截断；图像行为"宽×高 · 体积"摘要
@@ -321,13 +341,14 @@ impl ClipboardView {
                 row.child(
                     div()
                         .text_xs()
-                        .text_color(cx.theme().muted_foreground)
+                        .text_color(cx.theme().muted_foreground.opacity(0.8))
                         .child(format!("{} 字符", clip.char_count)),
                 )
             })
             .child(
                 div()
                     .w_16()
+                    .text_right()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .child(relative_time(clip.created_at)),
@@ -463,18 +484,35 @@ impl ClipboardView {
         let count = self.selection.len();
 
         h_flex()
-            .px_3()
-            .py_1p5()
+            .px_3p5()
+            .py_2()
             .gap_2()
             .items_center()
             .justify_between()
             .border_t_1()
-            .border_color(cx.theme().border)
+            .border_color(cx.theme().border.opacity(0.4))
+            .bg(cx.theme().secondary.opacity(0.85))
             .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(format!("已选 {count} 条 · 再点一次取消 · Esc 清空")),
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        div()
+                            .px_2()
+                            .py_0p5()
+                            .rounded(px(4.))
+                            .text_xs()
+                            .font_medium()
+                            .bg(brand(cx))
+                            .text_color(white())
+                            .child(format!("已选 {count} 项")),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("点击反选 · 按 Esc 清空选择"),
+                    ),
             )
             .child(
                 h_flex()
@@ -483,7 +521,7 @@ impl ClipboardView {
                         Button::new("batch-delete")
                             .danger()
                             .xsmall()
-                            .label("删除所选")
+                            .label("批量删除")
                             .on_click(
                                 cx.listener(|this, _, _, cx| this.delete_selected_batch(cx)),
                             ),
@@ -492,7 +530,7 @@ impl ClipboardView {
                         Button::new("batch-cancel")
                             .ghost()
                             .xsmall()
-                            .label("清空选择")
+                            .label("清空")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.selection.clear();
                                 cx.notify();
@@ -504,24 +542,38 @@ impl ClipboardView {
     /// 分类标签行：全部 / 文本 / 图像 / 文件 / 收藏（Alt+1~5 等效）
     fn render_filter_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         h_flex()
-            .px_3()
-            .pb_1()
-            .gap_1()
+            .px_3p5()
+            .pb_1p5()
+            .gap_1p5()
             .children(ClipFilter::ALL.iter().enumerate().map(|(ix, filter)| {
                 let active = *filter == self.filter;
-                div()
+                let shortcut = format!("Alt+{}", ix + 1);
+                h_flex()
                     .id(("clip-filter", ix))
-                    .px_2()
-                    .py_0p5()
-                    .rounded_sm()
+                    .px_2p5()
+                    .py_1()
+                    .gap_1p5()
+                    .items_center()
+                    .rounded_md()
                     .text_xs()
                     .cursor_pointer()
-                    .when(active, |chip| chip.bg(cx.theme().accent))
+                    .when(active, |chip| {
+                        chip.bg(cx.theme().accent)
+                            .text_color(cx.theme().accent_foreground)
+                            .font_medium()
+                    })
                     .when(!active, |chip| {
                         chip.text_color(cx.theme().muted_foreground)
-                            .hover(|style| style.bg(cx.theme().accent.opacity(0.3)))
+                            .bg(cx.theme().secondary.opacity(0.35))
+                            .hover(|style| style.bg(cx.theme().accent.opacity(0.35)))
                     })
                     .child(filter.label())
+                    .child(
+                        div()
+                            .text_xs()
+                            .opacity(0.6)
+                            .child(shortcut),
+                    )
                     .on_click(cx.listener(move |this, _, _, cx| this.set_filter(*filter, cx)))
             }))
     }
@@ -552,17 +604,52 @@ impl Render for ClipboardView {
                     _ => {}
                 }
             }))
-            .child(div().px_3().pt_2().pb_1().child(Input::new(&self.input_state)))
+            .child(div().px_3p5().pt_3().pb_2().child(Input::new(&self.input_state)))
             .child(self.render_filter_bar(cx))
             .child(
                 h_flex()
-                    .px_3()
-                    .pb_1()
+                    .px_3p5()
+                    .py_2()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .justify_between()
+                    .items_center()
+                    .border_t_1()
+                    .border_color(cx.theme().border.opacity(0.35))
                     .child(format!("{} 条记录", self.items.len()))
-                    .child("↑↓ 选择 · 回车/双击上屏 · 单击多选 · 右键菜单 · 收藏拖动排序 · Alt+1~5 分类"),
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                h_flex()
+                                    .gap_1()
+                                    .items_center()
+                                    .child(kbd_pill("↑↓", cx))
+                                    .child("选择"),
+                            )
+                            .child(
+                                h_flex()
+                                    .gap_1()
+                                    .items_center()
+                                    .child(kbd_pill("↵", cx))
+                                    .child("粘贴"),
+                            )
+                            .child(
+                                h_flex()
+                                    .gap_1()
+                                    .items_center()
+                                    .child(kbd_pill("Ctrl+P", cx))
+                                    .child("收藏"),
+                            )
+                            .child(
+                                h_flex()
+                                    .gap_1()
+                                    .items_center()
+                                    .child(kbd_pill("Alt+1~5", cx))
+                                    .child("分类"),
+                            ),
+                    ),
             )
             .child(
                 div()

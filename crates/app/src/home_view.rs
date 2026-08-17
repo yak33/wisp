@@ -1,14 +1,16 @@
-//! 主页：uTools 风格的功能入口网格。
+//! 主页：Raycast / Linear 风格的功能入口与 Command Bar。
 //!
 //! 唤起即落在主页——搜索框过滤功能，回车或点击进入功能页；
 //! 规划中的功能置灰占位，顺带充当内置路线图。
 
 use gpui::{prelude::FluentBuilder as _, *};
 use gpui_component::{
-    ActiveTheme as _, Icon, IconName, h_flex,
+    ActiveTheme as _, Icon, IconName, StyledExt as _, h_flex,
     input::{Input, InputEvent, InputState},
     v_flex,
 };
+
+use crate::ui::{brand, kbd_pill, tint};
 
 /// 主页发出的"打开功能页"请求，由根视图订阅并完成切换。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,8 +22,10 @@ pub(crate) enum OpenFeature {
 /// 一张功能卡片的静态描述。`target` 为 None 表示规划中：置灰、不可进入。
 struct Feature {
     name: &'static str,
-    /// 搜索别名：中文名之外的英文命中词
+    desc: &'static str,
+    /// 搜索别名：中文名之外的英文或拼音命中词
     aliases: &'static [&'static str],
+    shortcut: &'static str,
     icon: IconName,
     tint: u32,
     target: Option<OpenFeature>,
@@ -30,14 +34,18 @@ struct Feature {
 const FEATURES: &[Feature] = &[
     Feature {
         name: "剪贴板",
-        aliases: &["clipboard"],
+        desc: "历史记录 · 文本与截图即时存取",
+        aliases: &["clipboard", "clip", "jt"],
+        shortcut: "Ctrl+1",
         icon: IconName::Copy,
         tint: 0x378add,
         target: Some(OpenFeature::Clipboard),
     },
     Feature {
         name: "备忘快贴",
-        aliases: &["memo", "note"],
+        desc: "片段管理 · 常用代码与标签化文本",
+        aliases: &["memo", "note", "bw"],
+        shortcut: "Ctrl+2",
         icon: IconName::BookOpen,
         tint: 0x7f77dd,
         target: Some(OpenFeature::Memo),
@@ -45,7 +53,9 @@ const FEATURES: &[Feature] = &[
     // 图像 / 文件不是独立功能，是剪贴板历史的内部分类（见 ClipFilter），不在此占位
     Feature {
         name: "IP 工具",
-        aliases: &["ip"],
+        desc: "网络工具 · 三段 IP 与延迟面板",
+        aliases: &["ip", "wl"],
+        shortcut: "规划中",
         icon: IconName::Globe,
         tint: 0x1d9e75,
         target: None,
@@ -143,36 +153,54 @@ impl HomeView {
 
         v_flex()
             .id(("feature", ix))
-            .w(px(104.))
-            .py_2()
-            .gap_1p5()
-            .items_center()
-            .rounded_lg()
-            .when(enabled && selected, |card| card.bg(cx.theme().accent))
-            .when(enabled, |card| {
-                card.cursor_pointer()
-                    .hover(|style| style.bg(cx.theme().accent.opacity(0.3)))
+            .w(px(216.))
+            .p_3()
+            .gap_2()
+            .rounded_xl()
+            .bg(cx.theme().secondary.opacity(0.45))
+            .border_1()
+            .when(enabled && selected, |card| {
+                card.border_color(brand(cx))
+                    .bg(cx.theme().accent.opacity(0.75))
             })
-            .when(!enabled, |card| card.opacity(0.35))
+            .when(!selected, |card| {
+                card.border_color(cx.theme().border.opacity(0.35))
+            })
+            .when(enabled, |card| {
+                card.cursor_pointer().hover(|style| {
+                    style
+                        .bg(cx.theme().accent.opacity(0.35))
+                        .border_color(cx.theme().border.opacity(0.6))
+                })
+            })
+            .when(!enabled, |card| card.opacity(0.4))
             .child(
-                div()
-                    .size(px(52.))
-                    .rounded_xl()
-                    .flex()
+                h_flex()
+                    .justify_between()
                     .items_center()
-                    .justify_center()
-                    // 图标颜色取自文本样式栈，这里统一染白
-                    .text_color(white())
-                    .bg(rgb(feature.tint))
-                    .child(Icon::new(feature.icon.clone()).w(px(26.)).h(px(26.))),
+                    .child(
+                        div()
+                            .size(px(36.))
+                            .rounded_lg()
+                            .bg(tint(feature.tint, cx).opacity(0.15))
+                            .text_color(tint(feature.tint, cx))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(Icon::new(feature.icon.clone()).w(px(20.)).h(px(20.))),
+                    )
+                    .child(kbd_pill(feature.shortcut, cx)),
             )
-            .child(div().text_sm().child(feature.name))
             .child(
-                div()
-                    .h(px(16.))
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(if enabled { "" } else { "规划中" }),
+                v_flex()
+                    .gap_0p5()
+                    .child(div().font_semibold().text_sm().child(feature.name))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(feature.desc),
+                    ),
             )
             .when_some(feature.target, |card, target| {
                 card.on_click(cx.listener(move |_, _, _, cx| cx.emit(target)))
@@ -193,21 +221,28 @@ impl Render for HomeView {
                     _ => {}
                 }
             }))
-            .child(div().px_3().pt_2().pb_1().child(Input::new(&self.search_state)))
+            .child(
+                div()
+                    .px_3p5()
+                    .pt_3()
+                    .pb_2()
+                    .child(Input::new(&self.search_state)),
+            )
             .child(
                 div()
                     .px_4()
-                    .pb_1()
+                    .pb_2()
                     .text_xs()
+                    .font_medium()
                     .text_color(cx.theme().muted_foreground)
-                    .child("功能"),
+                    .child("功能推荐"),
             )
             .child(
                 h_flex()
                     .flex_1()
                     .min_h_0()
-                    .px_3()
-                    .gap_2()
+                    .px_3p5()
+                    .gap_2p5()
                     .flex_wrap()
                     .items_start()
                     .children(
@@ -219,13 +254,41 @@ impl Render for HomeView {
             )
             .child(
                 h_flex()
-                    .px_3()
-                    .pb_1()
+                    .px_3p5()
+                    .py_2()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .justify_between()
+                    .items_center()
+                    .border_t_1()
+                    .border_color(cx.theme().border.opacity(0.35))
                     .child(format!("{} 个功能", features.len()))
-                    .child("↑↓ 选择 · 回车进入 · Esc 隐藏 · Ctrl+1/2 直达"),
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                h_flex()
+                                    .gap_1()
+                                    .items_center()
+                                    .child(kbd_pill("↑↓", cx))
+                                    .child("选择"),
+                            )
+                            .child(
+                                h_flex()
+                                    .gap_1()
+                                    .items_center()
+                                    .child(kbd_pill("↵", cx))
+                                    .child("进入"),
+                            )
+                            .child(
+                                h_flex()
+                                    .gap_1()
+                                    .items_center()
+                                    .child(kbd_pill("Esc", cx))
+                                    .child("隐藏"),
+                            ),
+                    ),
             )
     }
 }
