@@ -174,6 +174,16 @@ impl WispView {
         cx.notify();
     }
 
+    /// 托盘菜单直达内置模块。统一复用正常页面切换流程，保证配置、刷新与焦点语义一致。
+    pub(crate) fn open_page_from_shell(
+        &mut self,
+        page: Page,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_page(page, window, cx);
+    }
+
     /// 主题偏好循环一档（跟随系统 → 浅色 → 深色），立即生效并落盘。
     fn cycle_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         ThemePreference::current(cx).next().select(Some(window), cx);

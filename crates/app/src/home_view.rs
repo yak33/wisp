@@ -12,6 +12,9 @@ use gpui_component::{
 
 use crate::ui::{kbd_pill, search_input, tint};
 
+const LIGHT_CARD_BACKGROUND: u32 = 0xFCFCFC;
+const LIGHT_CARD_HOVER_BACKGROUND: u32 = 0xF3F3F3;
+
 /// 主页发出的"打开功能页"请求，由根视图订阅并完成切换。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OpenFeature {
@@ -150,15 +153,28 @@ impl HomeView {
     fn render_card(&self, ix: usize, feature: &'static Feature, cx: &Context<Self>) -> Stateful<Div> {
         let enabled = feature.target.is_some();
         let selected = ix == self.selected;
+        let is_dark = cx.theme().mode.is_dark();
+        let idle_background: Hsla = if is_dark {
+            cx.theme().secondary.opacity(0.45)
+        } else {
+            rgb(LIGHT_CARD_BACKGROUND).into()
+        };
+        let hover_background: Hsla = if is_dark {
+            cx.theme().accent.opacity(0.35)
+        } else {
+            rgb(LIGHT_CARD_HOVER_BACKGROUND).into()
+        };
         // 功能卡面积大，选中层级应比列表行更轻，避免形成沉重的整块灰面。
-        let selected_background = cx
-            .theme()
-            .foreground
-            .opacity(if cx.theme().mode.is_dark() { 0.08 } else { 0.06 });
+        // 浅色档选中与悬停共用 #F3F3F3，边缘提示负责区分键盘选中状态。
+        let selected_background = if is_dark {
+            cx.theme().foreground.opacity(0.08)
+        } else {
+            hover_background
+        };
         let selected_edge = cx
             .theme()
             .foreground
-            .opacity(if cx.theme().mode.is_dark() { 0.28 } else { 0.14 });
+            .opacity(if is_dark { 0.28 } else { 0.14 });
 
         v_flex()
             .id(("feature", ix))
@@ -166,7 +182,7 @@ impl HomeView {
             .p_3()
             .gap_2()
             .rounded_xl()
-            .bg(cx.theme().secondary.opacity(0.45))
+            .bg(idle_background)
             .border_1()
             .when(enabled && selected, |card| {
                 card.border_color(selected_edge).bg(selected_background)
@@ -177,7 +193,7 @@ impl HomeView {
             .when(enabled, |card| {
                 card.cursor_pointer().hover(|style| {
                     style
-                        .bg(cx.theme().accent.opacity(0.35))
+                        .bg(hover_background)
                         .border_color(cx.theme().border.opacity(0.6))
                 })
             })

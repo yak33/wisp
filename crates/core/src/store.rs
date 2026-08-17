@@ -4,7 +4,7 @@
 //! FTS5 + 中文分词的复杂度；量级或延迟出现拐点时再升级。
 
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     sync::Mutex,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -21,6 +21,11 @@ const MAX_ROWS: usize = 2000;
 
 pub(crate) struct ClipStore {
     conn: Mutex<Connection>,
+}
+
+pub(crate) struct ClearedClips {
+    pub count: usize,
+    pub image_paths: Vec<PathBuf>,
 }
 
 impl ClipStore {
@@ -274,6 +279,33 @@ impl ClipStore {
         Ok(())
     }
 
+    pub fn unpinned_count(&self) -> Result<usize> {
+        let conn = self.conn.lock().expect("clip store poisoned");
+        let count = conn.query_row("SELECT COUNT(*) FROM clips WHERE pinned = 0", [], |row| {
+            row.get::<_, i64>(0)
+        })?;
+        Ok(count.max(0) as usize)
+    }
+
+    /// 事务内清空全部未收藏记录，并带回需要回收的受管图像路径。
+    /// 收藏是用户明确保留的内容，不参与批量清理。
+    pub fn clear_unpinned(&self) -> Result<ClearedClips> {
+        let mut conn = self.conn.lock().expect("clip store poisoned");
+        let tx = conn.transaction()?;
+        let image_paths = {
+            let mut stmt =
+                tx.prepare("SELECT content FROM clips WHERE pinned = 0 AND kind = ?1")?;
+            stmt.query_map(params![ClipKind::Image as i64], |row| {
+                row.get::<_, String>(0).map(PathBuf::from)
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let count = tx.execute("DELETE FROM clips WHERE pinned = 0", [])?;
+        tx.commit()?;
+
+        Ok(ClearedClips { count, image_paths })
+    }
+
     /// 全部图像条目的落盘文件名（孤儿文件清理用）。
     /// 文件按内容哈希命名，与行一一对应，比对文件名即可。
     pub fn image_file_names(&self) -> Result<Vec<String>> {
@@ -418,6 +450,28 @@ mod tests {
 
         let clips = store.query(ClipFilter::All, "", 10).unwrap();
         assert_eq!(clips[0].content, "置顶");
+    }
+
+    #[test]
+    fn clear_unpinned_preserves_favorites_and_reports_images() {
+        let store = memory_store();
+        store.insert_text("普通文本").unwrap();
+        store.insert_text("收藏文本").unwrap();
+        store
+            .insert_image(0xff, r"C:\Wisp\images\00ff.png", "800×600 · 12.3 KB", b"t")
+            .unwrap();
+        store.toggle_pin(id_of(&store, "收藏文本")).unwrap();
+
+        assert_eq!(store.unpinned_count().unwrap(), 2);
+        let cleared = store.clear_unpinned().unwrap();
+
+        assert_eq!(cleared.count, 2);
+        assert_eq!(
+            cleared.image_paths,
+            vec![PathBuf::from(r"C:\Wisp\images\00ff.png")]
+        );
+        assert_eq!(store.unpinned_count().unwrap(), 0);
+        assert_eq!(contents(&store), ["收藏文本"]);
     }
 
     #[test]

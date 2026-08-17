@@ -15,6 +15,7 @@ use gpui_component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
+    scroll::ScrollableElement as _,
     switch::Switch,
     v_flex,
 };
@@ -324,13 +325,11 @@ impl SettingsView {
 
 impl Render for SettingsView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex()
+        div()
+            .id("settings-scroll")
             .size_full()
             .track_focus(&self.focus_handle)
-            .px_3p5()
-            .py_3()
-            .gap_4()
-            .overflow_hidden()
+            .overflow_y_scrollbar()
             // 录制态独占键盘：捕获组合并截断冒泡，避免触发根视图的
             // Esc 返回 / Ctrl+1/2 切页
             .when(self.recording, |page| {
@@ -339,9 +338,17 @@ impl Render for SettingsView {
                     cx.stop_propagation();
                 }))
             })
-            .child(self.render_hotkey_section(cx))
-            .child(self.render_general_section(cx))
-            .child(self.render_appearance_section(cx))
-            .child(self.render_about_section(cx))
+            .child(
+                v_flex()
+                    .w_full()
+                    .px_3p5()
+                    .pt_3()
+                    .pb_4()
+                    .gap_4()
+                    .child(self.render_hotkey_section(cx))
+                    .child(self.render_general_section(cx))
+                    .child(self.render_appearance_section(cx))
+                    .child(self.render_about_section(cx)),
+            )
     }
 }

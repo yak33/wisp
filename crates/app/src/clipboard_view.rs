@@ -10,8 +10,10 @@ use std::{
 
 use gpui::{prelude::FluentBuilder as _, *};
 use gpui_component::{
-    ActiveTheme as _, Sizable as _, StyledExt as _, VirtualListScrollHandle,
-    button::{Button, ButtonVariants as _},
+    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, StyledExt as _,
+    VirtualListScrollHandle, WindowExt as _,
+    button::{Button, ButtonVariant, ButtonVariants as _},
+    dialog::DialogButtonProps,
     h_flex,
     input::{InputEvent, InputState},
     menu::{ContextMenu, ContextMenuExt as _, PopupMenuItem},
@@ -48,6 +50,8 @@ pub(crate) struct ClipboardView {
     keyword: String,
     filter: ClipFilter,
     items: Vec<Clip>,
+    /// 全库未收藏记录数，随列表刷新更新；不受当前搜索和分类影响。
+    unpinned_count: usize,
     item_sizes: Rc<Vec<Size<Pixels>>>,
     /// 键盘光标行（↑↓/Enter/Ctrl+P 的作用对象）
     selected: usize,
@@ -89,6 +93,7 @@ impl ClipboardView {
             keyword: String::new(),
             filter: ClipFilter::All,
             items: Vec::new(),
+            unpinned_count: 0,
             item_sizes: Rc::new(Vec::new()),
             selected: 0,
             selection: BTreeSet::new(),
@@ -111,6 +116,7 @@ impl ClipboardView {
     /// 结果集变了，多选集合随之作废。
     pub fn reload(&mut self, cx: &mut Context<Self>) {
         self.items = self.service.query(self.filter, &self.keyword, QUERY_LIMIT);
+        self.unpinned_count = self.service.unpinned_count();
         self.item_sizes = Rc::new(vec![size(ROW_WIDTH, ROW_HEIGHT); self.items.len()]);
         self.selected = 0;
         self.selection.clear();
@@ -168,6 +174,46 @@ impl ClipboardView {
             _ = self.service.delete(id);
         }
         self.reload(cx);
+    }
+
+    /// 清空全部未收藏历史。确认文案展示全库影响范围，不受当前筛选条件干扰。
+    fn open_clear_history_dialog(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let count = self.service.unpinned_count();
+        if count == 0 {
+            return;
+        }
+
+        let view = cx.entity();
+        window.open_alert_dialog(cx, move |dialog, _, cx| {
+            let view = view.clone();
+            dialog
+                .icon(Icon::new(IconName::TriangleAlert).text_color(warning(cx)))
+                .title("清空剪贴板历史")
+                .description(format!(
+                    "将删除 {count} 条未收藏记录，收藏内容会保留。此操作无法撤销。"
+                ))
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("清空历史")
+                        .ok_variant(ButtonVariant::Danger)
+                        .cancel_text("取消")
+                        .show_cancel(true),
+                )
+                .on_ok(move |_, _, cx| {
+                    view.update(cx, |this, cx| match this.service.clear_unpinned() {
+                        Ok(_) => {
+                            this.thumbs.borrow_mut().clear();
+                            this.previews.borrow_mut().clear();
+                            this.reload(cx);
+                            true
+                        }
+                        Err(err) => {
+                            eprintln!("清空剪贴板历史失败: {err:#}");
+                            false
+                        }
+                    })
+                })
+        });
     }
 
     fn move_selection(&mut self, delta: i64, cx: &mut Context<Self>) {
@@ -531,7 +577,7 @@ impl ClipboardView {
                         Button::new("batch-cancel")
                             .ghost()
                             .xsmall()
-                            .label("清空")
+                            .label("取消选择")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.selection.clear();
                                 cx.notify();
@@ -628,6 +674,21 @@ impl Render for ClipboardView {
                         h_flex()
                             .gap_2()
                             .items_center()
+                            .child(
+                                Button::new("clear-history")
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(IconName::Delete)
+                                    .tooltip(if self.unpinned_count == 0 {
+                                        "暂无可清空的历史"
+                                    } else {
+                                        "清空历史（保留收藏）"
+                                    })
+                                    .disabled(self.unpinned_count == 0)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.open_clear_history_dialog(window, cx)
+                                    })),
+                            )
                             .child(
                                 h_flex()
                                     .gap_1()

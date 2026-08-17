@@ -7,9 +7,9 @@
 
 use std::{
     io::Cursor,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicI64, Ordering},
     },
     thread,
@@ -40,6 +40,9 @@ const SUPPRESS_WINDOW_MS: i64 = 500;
 
 pub struct ClipboardService {
     store: Arc<ClipStore>,
+    images_dir: PathBuf,
+    /// 串行化“图片落盘 + 入库”与批量清理，避免新截图落到已被清理的路径。
+    mutation_guard: Arc<Mutex<()>>,
     changed_tx: Sender<()>,
     /// 交付回环抑制截止时刻（Unix 毫秒）。worker 唤醒时早于该时刻则跳过。
     suppress_until: Arc<AtomicI64>,
@@ -68,8 +71,11 @@ impl ClipboardService {
         let watcher = watcher::start(clipboard_tx)?;
 
         let suppress_until = Arc::new(AtomicI64::new(0));
+        let mutation_guard = Arc::new(Mutex::new(()));
         let worker_store = Arc::clone(&store);
         let worker_suppress = Arc::clone(&suppress_until);
+        let worker_mutation_guard = Arc::clone(&mutation_guard);
+        let worker_images_dir = images_dir.clone();
         let worker_changed_tx = changed_tx.clone();
         thread::Builder::new()
             .name("wisp-clipboard-worker".into())
@@ -84,6 +90,9 @@ impl ClipboardService {
                     }
                     // 三格式探测：文本 → 图像 → 文件列表
                     // （写入方可能还占着剪贴板，各带短退避重试）
+                    let _mutation = worker_mutation_guard
+                        .lock()
+                        .expect("clipboard mutation guard poisoned");
                     let inserted = if let Some(text) = read_clipboard_text_with_retry() {
                         if text.trim().is_empty() || text.len() > MAX_TEXT_BYTES {
                             false
@@ -91,10 +100,10 @@ impl ClipboardService {
                             worker_store.insert_text(&text).is_ok()
                         }
                     } else if let Some(image) = read_clipboard_image() {
-                        match persist_image(&images_dir, &image) {
-                            Some((hash, path, preview, thumb)) => {
-                                worker_store.insert_image(hash, &path, &preview, &thumb).is_ok()
-                            }
+                        match persist_image(&worker_images_dir, &image) {
+                            Some((hash, path, preview, thumb)) => worker_store
+                                .insert_image(hash, &path, &preview, &thumb)
+                                .is_ok(),
                             None => false,
                         }
                     } else if let Some(files) = read_clipboard_files() {
@@ -113,6 +122,8 @@ impl ClipboardService {
 
         Ok(Self {
             store,
+            images_dir,
+            mutation_guard,
             changed_tx,
             suppress_until,
             _watcher: watcher,
@@ -198,6 +209,26 @@ impl ClipboardService {
 
     pub fn delete(&self, id: i64) -> Result<()> {
         self.store.delete(id)
+    }
+
+    /// 全部未收藏记录数。用于在破坏性操作前明确告知影响范围。
+    pub fn unpinned_count(&self) -> usize {
+        self.store.unpinned_count().unwrap_or_default()
+    }
+
+    /// 清空全部未收藏记录，并立即回收这些记录对应的受管图像文件。
+    pub fn clear_unpinned(&self) -> Result<usize> {
+        let _mutation = self
+            .mutation_guard
+            .lock()
+            .expect("clipboard mutation guard poisoned");
+        let cleared = self.store.clear_unpinned()?;
+
+        for image_path in &cleared.image_paths {
+            remove_managed_image(&self.images_dir, image_path);
+        }
+
+        Ok(cleared.count)
     }
 }
 
@@ -335,6 +366,27 @@ fn sweep_orphan_images(store: &ClipStore, images_dir: &Path) {
     }
 }
 
+/// 只回收 Wisp 图像目录中的 PNG，数据库内容异常时也不越界删除用户文件。
+fn remove_managed_image(images_dir: &Path, image_path: &Path) {
+    if !is_managed_image_path(images_dir, image_path) {
+        return;
+    }
+
+    if let Err(err) = std::fs::remove_file(image_path)
+        && err.kind() != std::io::ErrorKind::NotFound
+    {
+        eprintln!("清理剪贴板图像失败（{}）: {err}", image_path.display());
+    }
+}
+
+fn is_managed_image_path(images_dir: &Path, image_path: &Path) -> bool {
+    image_path.parent() == Some(images_dir)
+        && image_path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("png"))
+}
+
 fn human_size(bytes: usize) -> String {
     const KB: f64 = 1024.0;
     const MB: f64 = 1024.0 * KB;
@@ -368,4 +420,27 @@ fn retry_write<T>(
     Err(anyhow::anyhow!(
         "写入系统剪贴板失败（已重试 {attempts} 次）: {detail}"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn managed_image_cleanup_never_crosses_the_images_directory() {
+        let images_dir = Path::new(r"C:\Wisp\data\images");
+
+        assert!(is_managed_image_path(
+            images_dir,
+            Path::new(r"C:\Wisp\data\images\00ff.png")
+        ));
+        assert!(!is_managed_image_path(
+            images_dir,
+            Path::new(r"C:\Wisp\data\outside.png")
+        ));
+        assert!(!is_managed_image_path(
+            images_dir,
+            Path::new(r"C:\Wisp\data\images\notes.txt")
+        ));
+    }
 }

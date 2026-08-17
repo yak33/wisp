@@ -22,7 +22,7 @@ use gpui_component::Root;
 use raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
 use tray_icon::{
     TrayIcon, TrayIconBuilder, TrayIconEvent,
-    menu::{CheckMenuItem, Menu, MenuEvent, MenuItem},
+    menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem},
 };
 use windows::{
     Win32::{
@@ -35,16 +35,20 @@ use windows::{
             Threading::CreateMutexW,
         },
         UI::WindowsAndMessaging::{
-            IsWindowVisible, SetForegroundWindow, ShowWindow, SW_HIDE, SW_SHOW,
+            IsWindowVisible, MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND, MessageBoxW,
+            SetForegroundWindow, ShowWindow, SW_HIDE, SW_SHOW,
         },
     },
-    core::w,
+    core::{HSTRING, w},
 };
 use wisp_core::{ClipboardService, MemoService};
 
 use crate::assets::WispAssets;
 
-use crate::{config::Config, wisp_view::WispView};
+use crate::{
+    config::Config,
+    wisp_view::{Page, WispView},
+};
 
 const WINDOW_SIZE: Size<Pixels> = size(px(720.), px(520.));
 
@@ -161,6 +165,10 @@ enum ShellEvent {
     Toggle,
     /// 仅唤起（托盘双击）
     Show,
+    /// 唤起并直达指定内置模块
+    OpenPage(Page),
+    /// 展示原生关于信息框
+    About,
     /// 剪贴板有新条目入库
     ClipsChanged,
     /// 切换开机自启（托盘菜单）
@@ -246,16 +254,49 @@ pub(crate) fn set_autostart(enabled: bool) -> bool {
 
 /// 托盘菜单。勾选态取自注册表实况——切换后整体重建，绕开菜单项
 /// 不可跨线程持有的问题（muda 句柄是 Rc）。
-fn build_tray_menu(hotkey_label: &str) -> Menu {
+fn build_tray_menu() -> Menu {
     let menu = Menu::new();
-    let toggle = MenuItem::with_id("toggle", format!("显示 / 隐藏（{hotkey_label}）"), true, None);
+    let toggle = MenuItem::with_id("toggle", "显示 / 隐藏", true, None);
+    let section_modules = PredefinedMenuItem::separator();
+    let clipboard = MenuItem::with_id("clipboard", "剪贴板历史", true, None);
+    let memo = MenuItem::with_id("memo", "备忘快贴", true, None);
+    let section_app = PredefinedMenuItem::separator();
+    let settings = MenuItem::with_id("settings", "设置", true, None);
+    let about = MenuItem::with_id("about", "关于", true, None);
+    let section_system = PredefinedMenuItem::separator();
     let autostart = CheckMenuItem::with_id("autostart", "开机自启", true, autostart_enabled(), None);
     let quit = MenuItem::with_id("quit", "退出 Wisp", true, None);
-    menu.append(&toggle)
-        .and_then(|_| menu.append(&autostart))
-        .and_then(|_| menu.append(&quit))
+    menu.append_items(&[
+        &toggle,
+        &section_modules,
+        &clipboard,
+        &memo,
+        &section_app,
+        &settings,
+        &about,
+        &section_system,
+        &autostart,
+        &quit,
+    ])
         .expect("托盘菜单构建失败");
     menu
+}
+
+/// 原生关于信息框。托盘菜单不依赖主窗口可见状态，隐藏时也能直接查看版本信息。
+fn show_about(cx: &App) {
+    let owner = cx.try_global::<NativeWindow>().map(|native| hwnd(native.0));
+    let content = HSTRING::from(format!(
+        "Wisp v{}\n\n轻若无物的 Windows 效率工具\n剪贴板历史 · 备忘快贴 · IP 工具\n\n© ZHANGCHAO",
+        env!("CARGO_PKG_VERSION")
+    ));
+    unsafe {
+        _ = MessageBoxW(
+            owner,
+            &content,
+            w!("关于 Wisp"),
+            MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND,
+        );
+    }
 }
 
 // ==================== 壳层操作（设置页 / 事件泵共用） ====================
@@ -268,7 +309,7 @@ pub(crate) fn refresh_tray(cx: &App) {
     let label = cx
         .try_global::<WakeHotkey>()
         .map_or("快捷键", |k| k.label.as_str());
-    sys.tray.set_menu(Some(Box::new(build_tray_menu(label))));
+    sys.tray.set_menu(Some(Box::new(build_tray_menu())));
     _ = sys.tray.set_tooltip(Some(format!("Wisp — {label} 唤起")));
 }
 
@@ -383,7 +424,7 @@ fn main() {
         let tray = TrayIconBuilder::new()
             .with_tooltip(format!("Wisp — {hotkey_label} 唤起"))
             .with_icon(tray_icon_image())
-            .with_menu(Box::new(build_tray_menu(&hotkey_label)))
+            .with_menu(Box::new(build_tray_menu()))
             .build()
             .expect("创建托盘图标失败");
         // 上次设置了隐藏托盘则开局即隐藏；此时快捷键必已注册成功（否则前面已 panic）
@@ -443,6 +484,10 @@ fn main() {
             let event_tx = event_tx.clone();
             move |ev: MenuEvent| match ev.id.0.as_str() {
                 "toggle" => _ = event_tx.try_send(ShellEvent::Toggle),
+                "clipboard" => _ = event_tx.try_send(ShellEvent::OpenPage(Page::Clipboard)),
+                "memo" => _ = event_tx.try_send(ShellEvent::OpenPage(Page::Memo)),
+                "settings" => _ = event_tx.try_send(ShellEvent::OpenPage(Page::Settings)),
+                "about" => _ = event_tx.try_send(ShellEvent::About),
                 "autostart" => _ = event_tx.try_send(ShellEvent::ToggleAutostart),
                 "quit" => _ = event_tx.try_send(ShellEvent::Quit),
                 _ => {}
@@ -470,6 +515,8 @@ fn main() {
                 match event {
                     ShellEvent::Toggle => cx.update(|cx| toggle_visibility(cx, true)),
                     ShellEvent::Show => cx.update(|cx| toggle_visibility(cx, false)),
+                    ShellEvent::OpenPage(page) => cx.update(|cx| show_main_window(cx, Some(page))),
+                    ShellEvent::About => cx.update(|cx| show_about(cx)),
                     ShellEvent::ClipsChanged => cx.update(|cx| {
                         if let Some(main) = cx.try_global::<MainView>() {
                             let view = main.0.clone();
@@ -501,11 +548,29 @@ fn toggle_visibility(cx: &mut App, toggle: bool) {
     if toggle && is_native_visible(raw) {
         hide_native(raw);
     } else {
-        // 必须在自己抢到前台之前记录，否则记到的就是 Wisp 自己
-        cx.set_global(LastForeground(wisp_core::capture_foreground(Some(raw))));
-        show_native(raw);
-        for window in cx.windows() {
-            _ = window.update(cx, |_, window, _| window.activate_window());
-        }
+        show_main_window(cx, None);
+    }
+}
+
+/// 唤起主窗口；`page` 存在时由托盘菜单直达指定内置模块。
+fn show_main_window(cx: &mut App, page: Option<Page>) {
+    let Some(native) = cx.try_global::<NativeWindow>() else {
+        return;
+    };
+    let raw = native.0;
+
+    // 必须在自己抢到前台之前记录，否则记到的就是 Wisp 自己
+    cx.set_global(LastForeground(wisp_core::capture_foreground(Some(raw))));
+    show_native(raw);
+
+    let main_view = cx.try_global::<MainView>().map(|main| main.0.clone());
+    for window in cx.windows() {
+        let main_view = main_view.clone();
+        _ = window.update(cx, |_, window, cx| {
+            if let (Some(page), Some(view)) = (page, main_view) {
+                view.update(cx, |view, cx| view.open_page_from_shell(page, window, cx));
+            }
+            window.activate_window();
+        });
     }
 }
