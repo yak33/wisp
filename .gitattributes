@@ -1,0 +1,7 @@
+# 行尾规范化：仓库内统一 LF；工作区按平台原生行尾检出（Windows 为 CRLF）。
+# git 在入库与比较时自动规范化，编辑器行尾偏好不再产生伪 diff。
+* text=auto
+
+# 图像与图标强制按二进制处理，禁止任何行尾转换
+*.png binary
+*.ico binary
