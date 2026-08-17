@@ -5,7 +5,16 @@
 //! - 工作线程（worker）：收信号 → 读剪贴板 → 入库 → 通知壳层刷新；
 //! - 壳层线程：只做查询与写回剪贴板，全部走 [`ClipboardService`] 方法。
 
-use std::{io::Cursor, path::Path, sync::Arc, thread, time::Duration};
+use std::{
+    io::Cursor,
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicI64, Ordering},
+    },
+    thread,
+    time::Duration,
+};
 
 use anyhow::{Context as _, Result};
 use crossbeam_channel::Sender;
@@ -13,7 +22,7 @@ use crossbeam_channel::Sender;
 use crate::{
     clip::{Clip, ClipFilter, ClipKind, fingerprint},
     paste,
-    store::ClipStore,
+    store::{ClipStore, now_ms},
     watcher,
 };
 
@@ -25,9 +34,15 @@ const MAX_IMAGE_PIXELS: u64 = 4096 * 4096;
 const THUMB_MAX_EDGE: u32 = 128;
 /// 单次文件列表的最大文件数熔断
 const MAX_FILE_COUNT: usize = 100;
+/// 交付回环抑制窗：交付写回剪贴板后，worker 在该时长内忽略监听信号。
+/// 须覆盖 watcher→worker 的唤醒延迟，且远大于 Ctrl+V 的发出时刻（+80ms）。
+const SUPPRESS_WINDOW_MS: i64 = 500;
 
 pub struct ClipboardService {
     store: Arc<ClipStore>,
+    changed_tx: Sender<()>,
+    /// 交付回环抑制截止时刻（Unix 毫秒）。worker 唤醒时早于该时刻则跳过。
+    suppress_until: Arc<AtomicI64>,
     _watcher: watcher::ClipboardWatcher,
 }
 
@@ -46,15 +61,27 @@ impl ClipboardService {
             .parent()
             .map(|dir| dir.join("images"))
             .unwrap_or_else(|| Path::new("images").to_path_buf());
+        // 孤儿图像随启动一并扫除：prune 与手动删除只删行，落盘文件在此回收
+        sweep_orphan_images(&store, &images_dir);
 
         let (clipboard_tx, clipboard_rx) = crossbeam_channel::unbounded::<()>();
         let watcher = watcher::start(clipboard_tx)?;
 
+        let suppress_until = Arc::new(AtomicI64::new(0));
         let worker_store = Arc::clone(&store);
+        let worker_suppress = Arc::clone(&suppress_until);
+        let worker_changed_tx = changed_tx.clone();
         thread::Builder::new()
             .name("wisp-clipboard-worker".into())
             .spawn(move || {
                 for () in clipboard_rx.iter() {
+                    // 交付回环抑制：交付（复制/粘贴）是自家写回，其信号不入库。
+                    // 若此时读剪贴板做回收，会与目标应用在 Ctrl+V 时刻竞争
+                    // OpenClipboard——实测图像交付后 ~+300ms 出现 30ms 级占用窗，
+                    // 恰覆盖 paste 线程发出 Ctrl+V 的位置，导致粘贴静默落空。
+                    if worker_suppress.load(Ordering::Relaxed) > now_ms() {
+                        continue;
+                    }
                     // 三格式探测：文本 → 图像 → 文件列表
                     // （写入方可能还占着剪贴板，各带短退避重试）
                     let inserted = if let Some(text) = read_clipboard_text_with_retry() {
@@ -78,7 +105,7 @@ impl ClipboardService {
 
                     if inserted {
                         worker_store.prune();
-                        _ = changed_tx.try_send(());
+                        _ = worker_changed_tx.try_send(());
                     }
                 }
             })
@@ -86,6 +113,8 @@ impl ClipboardService {
 
         Ok(Self {
             store,
+            changed_tx,
+            suppress_until,
             _watcher: watcher,
         })
     }
@@ -95,13 +124,19 @@ impl ClipboardService {
         self.store.query(filter, keyword, limit).unwrap_or_default()
     }
 
-    /// 将指定条目写回系统剪贴板（触发监听回环，该条自动置顶）。
+    /// 将指定条目写回系统剪贴板并回顶（写回前开启回环抑制窗，
+    /// worker 不再把自家交付读回入库——回顶由 touch 确定性完成）。
     /// 文本走 arboard；图像走裸 Win32 双格式写入——arboard 3.6.1 的
     /// Windows 图像路径在本机持续失败（SetClipboardData 1418）。
     pub fn copy_to_clipboard(&self, id: i64) -> Result<()> {
         let (kind, content) = self.store.kind_and_content(id)?;
 
-        match kind {
+        // 写回前开抑制窗：WM_CLIPBOARDUPDATE 在 CloseClipboard 后即触发，
+        // 必须先落窗再写，窗口期才能完整覆盖 watcher→worker 的唤醒延迟
+        self.suppress_until
+            .store(now_ms() + SUPPRESS_WINDOW_MS, Ordering::Relaxed);
+
+        let written = match kind {
             ClipKind::Image => {
                 let png = std::fs::read(&content)
                     .with_context(|| format!("读取图像文件失败: {content}"))?;
@@ -116,18 +151,40 @@ impl ClipboardService {
                 arboard::Clipboard::new()
                     .and_then(|mut clipboard| clipboard.set_text(content.clone()))
             }),
+        };
+
+        match written {
+            Ok(()) => {
+                // 回顶与列表刷新都不再依赖回收回环；抑制窗内 worker 静默
+                _ = self.store.touch(id);
+                _ = self.changed_tx.try_send(());
+                Ok(())
+            }
+            Err(err) => {
+                // 写入未发生，无回环可抑——立即关窗，不误伤用户的正常复制
+                self.suppress_until.store(0, Ordering::Relaxed);
+                Err(err)
+            }
         }
     }
 
     /// 写回剪贴板并直接粘贴到 `target` 窗口；`target` 为空时退化为仅复制。
     ///
+    /// 图像分支含解码与 DIB 转换（实测百毫秒级），故整个交付在独立线程
+    /// 执行——UI 线程零阻塞，失败只能进日志（交付是即发即弃动作）。
+    ///
     /// 调用方需已隐藏自身窗口，否则焦点还原会与窗口显隐竞争。
-    pub fn paste_to(&self, id: i64, target: Option<isize>) -> Result<()> {
-        self.copy_to_clipboard(id)?;
-        if let Some(target) = target {
-            paste::paste_into(target);
-        }
-        Ok(())
+    pub fn paste_to(self: &Arc<Self>, id: i64, target: Option<isize>) {
+        let service = Arc::clone(self);
+        thread::spawn(move || {
+            if let Err(err) = service.copy_to_clipboard(id) {
+                eprintln!("交付失败: {err:#}");
+                return;
+            }
+            if let Some(target) = target {
+                paste::paste_into(target);
+            }
+        });
     }
 
     pub fn toggle_pin(&self, id: i64) -> Result<()> {
@@ -257,6 +314,25 @@ fn persist_image(
 
     let preview = format!("{width}×{height} · {}", human_size(png.len()));
     Some((hash, path.to_string_lossy().into_owned(), preview, thumb))
+}
+
+/// 孤儿图像清理：行已删（过期/封顶/手动删除）而落盘文件残留。
+/// 与 prune 同哲学——失败静默，清理是护栏不是关键路径。
+fn sweep_orphan_images(store: &ClipStore, images_dir: &Path) {
+    let keep: std::collections::HashSet<String> = store
+        .image_file_names()
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    let Ok(entries) = std::fs::read_dir(images_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.ends_with(".png") && !keep.contains(&name) {
+            _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 fn human_size(bytes: usize) -> String {

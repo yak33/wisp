@@ -256,10 +256,40 @@ impl ClipStore {
         Ok(())
     }
 
+    /// 交付回顶：仅刷新时间戳，条目回到列表顶部。
+    /// 取代旧的"回收回环置顶"——worker 抑制窗内不再读回自家交付，
+    /// 回顶必须在这里确定性完成。
+    pub fn touch(&self, id: i64) -> Result<()> {
+        let conn = self.conn.lock().expect("clip store poisoned");
+        conn.execute(
+            "UPDATE clips SET created_at = ?1 WHERE id = ?2",
+            params![now_ms(), id],
+        )?;
+        Ok(())
+    }
+
     pub fn delete(&self, id: i64) -> Result<()> {
         let conn = self.conn.lock().expect("clip store poisoned");
         conn.execute("DELETE FROM clips WHERE id = ?1", params![id])?;
         Ok(())
+    }
+
+    /// 全部图像条目的落盘文件名（孤儿文件清理用）。
+    /// 文件按内容哈希命名，与行一一对应，比对文件名即可。
+    pub fn image_file_names(&self) -> Result<Vec<String>> {
+        let conn = self.conn.lock().expect("clip store poisoned");
+        let mut stmt = conn.prepare("SELECT content FROM clips WHERE kind = ?1")?;
+        let rows = stmt.query_map(params![ClipKind::Image as i64], |row| {
+            row.get::<_, String>(0)
+        })?;
+        Ok(rows
+            .filter_map(|row| {
+                let content = row.ok()?;
+                std::path::Path::new(&content)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
+            .collect())
     }
 
     /// 例行清理：过期未置顶条目先走，再把未置顶总量压回上限。
@@ -360,6 +390,20 @@ mod tests {
         let clips = store.query(ClipFilter::All, "100%", 10).unwrap();
         assert_eq!(clips.len(), 1);
         assert_eq!(clips[0].content, "进度 100%");
+    }
+
+    #[test]
+    fn touch_moves_entry_to_top_without_duplicating() {
+        let store = memory_store();
+        store.insert_text("第一条").unwrap();
+        store.insert_text("第二条").unwrap();
+
+        let first_id = id_of(&store, "第一条");
+        store.touch(first_id).unwrap();
+
+        let clips = store.query(ClipFilter::All, "", 10).unwrap();
+        assert_eq!(clips.len(), 2);
+        assert_eq!(clips[0].content, "第一条");
     }
 
     #[test]
@@ -501,6 +545,21 @@ mod tests {
         let (kind, content) = store.kind_and_content(images[0].id).unwrap();
         assert_eq!(kind, ClipKind::Image);
         assert_eq!(content, path);
+    }
+
+    #[test]
+    fn image_file_names_lists_only_image_rows() {
+        let store = memory_store();
+        store
+            .insert_image(0xff, r"C:\Wisp\images\00ff.png", "800×600 · 12.3 KB", b"t")
+            .unwrap();
+        store.insert_text("文本").unwrap();
+        store.insert_files(77, "C:\\a\\报告.docx", "报告.docx").unwrap();
+
+        assert_eq!(
+            store.image_file_names().unwrap(),
+            vec!["00ff.png".to_string()]
+        );
     }
 
     #[test]

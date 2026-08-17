@@ -13,7 +13,7 @@ use gpui_component::{
     ActiveTheme as _, Sizable as _, StyledExt as _, VirtualListScrollHandle,
     button::{Button, ButtonVariants as _},
     h_flex,
-    input::{Input, InputEvent, InputState},
+    input::{InputEvent, InputState},
     menu::{ContextMenu, ContextMenuExt as _, PopupMenuItem},
     scroll::{ScrollableElement as _, ScrollbarAxis},
     tooltip::Tooltip,
@@ -23,7 +23,10 @@ use wisp_core::{Clip, ClipFilter, ClipKind, ClipboardService};
 
 use crate::{
     hide_main_window, paste_target,
-    ui::{brand, kbd_pill, warning},
+    ui::{
+        brand, kbd_pill, search_input, selection_background, selection_background_subtle,
+        selection_edge, warning,
+    },
 };
 
 const ROW_HEIGHT: Pixels = px(40.);
@@ -139,12 +142,11 @@ impl ClipboardView {
     }
 
     /// 按 id 交付：粘贴到唤起前的窗口（无目标则退化为仅复制）。
+    /// 交付全程在服务的独立线程执行（图像分支百毫秒级），UI 零阻塞。
     fn deliver_id(&mut self, id: i64, cx: &mut Context<Self>) {
         let target = paste_target(cx);
         hide_main_window(cx);
-        if let Err(err) = self.service.paste_to(id, target) {
-            eprintln!("交付失败: {err:#}");
-        }
+        self.service.paste_to(id, target);
     }
 
     /// 单击选择：切换该条的多选状态，键盘光标随之移过去。
@@ -192,9 +194,7 @@ impl ClipboardView {
 
     /// 解码缩略图为 GPU 可渲染图像并按条目缓存——每行每帧解码不可接受。
     fn thumb_image(&self, id: i64, thumb: Option<&[u8]>) -> Option<Arc<RenderImage>> {
-        let Some(bytes) = thumb else {
-            return None;
-        };
+        let bytes = thumb?;
         if let Some(cached) = self.thumbs.borrow().get(&id) {
             return Some(cached.clone());
         }
@@ -270,9 +270,9 @@ impl ClipboardView {
             .items_center()
             .border_b_1()
             .border_color(cx.theme().border.opacity(0.3))
-            .when(is_selected, |style| style.bg(cx.theme().accent.opacity(0.85)))
+            .when(is_selected, |style| style.bg(selection_background(cx)))
             .when(!is_selected && in_set, |style| {
-                style.bg(cx.theme().accent.opacity(0.5))
+                style.bg(selection_background_subtle(cx))
             })
             .when(!is_selected && !in_set, |style| {
                 style.hover(|style| style.bg(cx.theme().accent.opacity(0.3)))
@@ -283,7 +283,7 @@ impl ClipboardView {
                     .w(px(3.))
                     .h(px(16.))
                     .rounded_full()
-                    .when(is_selected, |bar| bar.bg(brand(cx)))
+                    .when(is_selected, |bar| bar.bg(selection_edge(cx)))
                     .when(!is_selected, |bar| bar.opacity(0.)),
             )
             .when(is_image, |row| {
@@ -393,10 +393,10 @@ impl ClipboardView {
                         let preview = preview.clone();
                         move |_, cx| {
                             // 图像：解码原图放大
-                            if let Some(path) = path.as_deref() {
-                                if let Some(image) = entity.read(cx).preview_image(id, path) {
-                                    return image_tooltip_body(image, preview.clone(), cx);
-                                }
+                            if let Some(path) = path.as_deref()
+                                && let Some(image) = entity.read(cx).preview_image(id, path)
+                            {
+                                return image_tooltip_body(image, preview.clone(), cx);
                             }
                             // 文件：逐行列出文件名
                             if let Some(files) = files.as_ref() {
@@ -504,7 +504,8 @@ impl ClipboardView {
                             .text_xs()
                             .font_medium()
                             .bg(brand(cx))
-                            .text_color(white())
+                            // 徽章底色是主题前景的反色块，文字取背景色保证双档对比度
+                            .text_color(cx.theme().background)
                             .child(format!("已选 {count} 项")),
                     )
                     .child(
@@ -604,7 +605,13 @@ impl Render for ClipboardView {
                     _ => {}
                 }
             }))
-            .child(div().px_3p5().pt_3().pb_2().child(Input::new(&self.input_state)))
+            .child(
+                div()
+                    .px_3p5()
+                    .pt_3()
+                    .pb_2()
+                    .child(search_input(&self.input_state, cx)),
+            )
             .child(self.render_filter_bar(cx))
             .child(
                 h_flex()

@@ -124,7 +124,7 @@ pub(crate) fn paste_target(cx: &App) -> Option<isize> {
 // ==================== 托盘 ====================
 
 fn tray_icon_image() -> tray_icon::Icon {
-    // 品牌图标（favicon 变体 32px 渲染产物）；解码失败退回紫色圆点
+    // 品牌图标（favicon 变体 32px 渲染产物）；解码失败退回中性灰圆点
     if let Ok(img) = image::load_from_memory(include_bytes!("../assets/tray.png")) {
         let rgba = img.to_rgba8();
         let (width, height) = (rgba.width(), rgba.height());
@@ -142,7 +142,7 @@ fn tray_icon_image() -> tray_icon::Icon {
         .flat_map(|(x, y)| {
             let (dx, dy) = (x - center, y - center);
             if dx * dx + dy * dy <= radius * radius {
-                [0x6C, 0x5C, 0xE7, 0xFF] // Wisp 紫
+                [0x88, 0x87, 0x80, 0xFF] // 中性灰（UI 已去品牌紫，此处保持一致）
             } else {
                 [0, 0, 0, 0]
             }
@@ -407,10 +407,10 @@ fn main() {
 
         cx.spawn(async move |cx| {
             cx.open_window(window_options, |window, cx| {
-                if let Ok(handle) = window.window_handle() {
-                    if let RawWindowHandle::Win32(win32) = handle.as_raw() {
-                        cx.set_global(NativeWindow(win32.hwnd.get()));
-                    }
+                if let Ok(handle) = window.window_handle()
+                    && let RawWindowHandle::Win32(win32) = handle.as_raw()
+                {
+                    cx.set_global(NativeWindow(win32.hwnd.get()));
                 }
                 let view = cx.new(|cx| {
                     WispView::new(
@@ -468,21 +468,21 @@ fn main() {
         cx.spawn(async move |cx| {
             while let Ok(event) = event_rx.recv().await {
                 match event {
-                    ShellEvent::Toggle => _ = cx.update(|cx| toggle_visibility(cx, true)),
-                    ShellEvent::Show => _ = cx.update(|cx| toggle_visibility(cx, false)),
-                    ShellEvent::ClipsChanged => _ = cx.update(|cx| {
+                    ShellEvent::Toggle => cx.update(|cx| toggle_visibility(cx, true)),
+                    ShellEvent::Show => cx.update(|cx| toggle_visibility(cx, false)),
+                    ShellEvent::ClipsChanged => cx.update(|cx| {
                         if let Some(main) = cx.try_global::<MainView>() {
                             let view = main.0.clone();
                             view.update(cx, |view, cx| view.reload_clips(cx));
                         }
                     }),
-                    ShellEvent::ToggleAutostart => _ = cx.update(|cx| {
+                    ShellEvent::ToggleAutostart => cx.update(|cx| {
                         set_autostart(!autostart_enabled());
                         // 菜单项句柄不可跨线程持有，重建整个菜单来刷新勾选态
                         refresh_tray(cx);
                     }),
                     ShellEvent::Quit => {
-                        _ = cx.update(|cx| cx.quit());
+                        cx.update(|cx| cx.quit());
                         return;
                     }
                 }
