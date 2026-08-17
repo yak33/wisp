@@ -23,7 +23,7 @@ use wisp_core::{Memo, MemoDraft, MemoService, TagFilter, TagSummary, parse_tags}
 
 use crate::{
     hide_main_window, paste_target,
-    ui::{brand, kbd_pill},
+    ui::{kbd_pill, search_input, selection_background, selection_edge},
 };
 
 const ROW_HEIGHT: Pixels = px(56.);
@@ -312,7 +312,7 @@ impl MemoView {
             .items_center()
             .border_b_1()
             .border_color(cx.theme().border.opacity(0.3))
-            .when(active, |row| row.bg(cx.theme().accent.opacity(0.85)))
+            .when(active, |row| row.bg(selection_background(cx)))
             .when(!active, |row| {
                 row.hover(|style| style.bg(cx.theme().accent.opacity(0.3)))
             })
@@ -322,7 +322,7 @@ impl MemoView {
                     .w(px(3.))
                     .h(px(24.))
                     .rounded_full()
-                    .when(active, |bar| bar.bg(brand(cx)))
+                    .when(active, |bar| bar.bg(selection_edge(cx)))
                     .when(!active, |bar| bar.opacity(0.)),
             )
             .child(
@@ -639,7 +639,13 @@ impl Render for MemoView {
                     body.child(self.render_editor(&editor, cx))
                 }
                 None => body
-                    .child(div().px_3p5().pt_3().pb_2().child(Input::new(&self.search_state)))
+                    .child(
+                        div()
+                            .px_3p5()
+                            .pt_3()
+                            .pb_2()
+                            .child(search_input(&self.search_state, cx)),
+                    )
                     .child(
                         h_flex()
                             .flex_1()

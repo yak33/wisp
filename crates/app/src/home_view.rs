@@ -6,11 +6,11 @@
 use gpui::{prelude::FluentBuilder as _, *};
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, StyledExt as _, h_flex,
-    input::{Input, InputEvent, InputState},
+    input::{InputEvent, InputState},
     v_flex,
 };
 
-use crate::ui::{brand, kbd_pill, tint};
+use crate::ui::{kbd_pill, search_input, tint};
 
 /// 主页发出的"打开功能页"请求，由根视图订阅并完成切换。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,6 +150,15 @@ impl HomeView {
     fn render_card(&self, ix: usize, feature: &'static Feature, cx: &Context<Self>) -> Stateful<Div> {
         let enabled = feature.target.is_some();
         let selected = ix == self.selected;
+        // 功能卡面积大，选中层级应比列表行更轻，避免形成沉重的整块灰面。
+        let selected_background = cx
+            .theme()
+            .foreground
+            .opacity(if cx.theme().mode.is_dark() { 0.08 } else { 0.06 });
+        let selected_edge = cx
+            .theme()
+            .foreground
+            .opacity(if cx.theme().mode.is_dark() { 0.28 } else { 0.14 });
 
         v_flex()
             .id(("feature", ix))
@@ -160,8 +169,7 @@ impl HomeView {
             .bg(cx.theme().secondary.opacity(0.45))
             .border_1()
             .when(enabled && selected, |card| {
-                card.border_color(brand(cx))
-                    .bg(cx.theme().accent.opacity(0.75))
+                card.border_color(selected_edge).bg(selected_background)
             })
             .when(!selected, |card| {
                 card.border_color(cx.theme().border.opacity(0.35))
@@ -226,7 +234,7 @@ impl Render for HomeView {
                     .px_3p5()
                     .pt_3()
                     .pb_2()
-                    .child(Input::new(&self.search_state)),
+                    .child(search_input(&self.search_state, cx)),
             )
             .child(
                 div()
@@ -249,7 +257,7 @@ impl Render for HomeView {
                         features
                             .iter()
                             .enumerate()
-                            .map(|(ix, feature)| self.render_card(ix, *feature, cx)),
+                            .map(|(ix, feature)| self.render_card(ix, feature, cx)),
                     ),
             )
             .child(

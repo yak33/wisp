@@ -4,10 +4,15 @@
 //! 落盘存三态，激活时把 System 解析为当前系统外观。系统深浅色切换的实时跟随
 //! 由 `wisp_view` 订阅 `observe_window_appearance` 后重新激活本偏好完成。
 
-use gpui::{App, Window};
+use gpui::{App, Window, rgb};
 use gpui_component::{Icon, IconName, Theme, ThemeMode};
 
 use crate::{assets::WispIcon, config};
+
+/// 深色模式主文字：避开默认主题接近纯白的高亮度，降低纯黑背景上的眩光。
+const DARK_FOREGROUND: u32 = 0xCACCCA;
+/// 深色模式辅助文字：与正文保持明确层级，同时确保小字号仍清晰可读。
+const DARK_MUTED_FOREGROUND: u32 = 0x8F8F8F;
 
 /// 用户选择的主题偏好。点击标题栏按钮按 System → Light → Dark 循环。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -89,7 +94,25 @@ impl ThemePreference {
             Self::Light => Theme::change(ThemeMode::Light, window, cx),
             Self::Dark => Theme::change(ThemeMode::Dark, window, cx),
         }
+        soften_dark_foreground(cx);
     }
+}
+
+/// 收敛暗色主题的文字亮度。
+///
+/// `foreground` 覆盖正文与输入框，`accent_foreground` 覆盖选中标签，
+/// `popover_foreground` 覆盖菜单与悬停层；三者统一，避免局部仍跳出纯白。
+fn soften_dark_foreground(cx: &mut App) {
+    let theme = Theme::global_mut(cx);
+    if !theme.mode.is_dark() {
+        return;
+    }
+
+    let foreground = rgb(DARK_FOREGROUND).into();
+    theme.foreground = foreground;
+    theme.accent_foreground = foreground;
+    theme.popover_foreground = foreground;
+    theme.muted_foreground = rgb(DARK_MUTED_FOREGROUND).into();
 }
 
 #[cfg(test)]

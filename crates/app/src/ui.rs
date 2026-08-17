@@ -1,15 +1,15 @@
-//! 现代极客风格的通用 UI 微组件与品牌色板（Raycast / Linear 审美规范）。
+//! 现代极客风格的通用 UI 微组件与标识色板（Raycast / Linear 审美规范）。
 //!
-//! 语义色一律走 `cx.theme()`，随主题自动切换；品牌色不在主题体系内，由本模块
-//! 的色板函数按当前明暗档适配后供各视图取用。
+//! 语义色一律走 `cx.theme()`，随主题自动切换；功能卡的彩色 tint 不在主题体系内，
+//! 由本模块的色板函数按当前明暗档适配后供各视图取用。
 
 use gpui::{prelude::FluentBuilder as _, *};
-use gpui_component::{ActiveTheme as _, StyledExt as _};
+use gpui_component::{
+    ActiveTheme as _, StyledExt as _,
+    input::{Input, InputState},
+};
 
-// ==================== 品牌色板 ====================
-
-/// Wisp 品牌紫：logo、选中导轨、批量选择徽章的标识色。
-pub(crate) const BRAND: u32 = 0x6C5CE7;
+// ==================== 标识色板 ====================
 
 /// 置顶/警示琥珀。
 const WARNING: u32 = 0xF59E0B;
@@ -18,7 +18,7 @@ const WARNING: u32 = 0xF59E0B;
 /// （琥珀 #F59E0B 在白底仅约 2.1:1），统一压到该阈值以下换回可读性。
 const LIGHT_LIGHTNESS_CAP: f32 = 0.42;
 
-/// 把品牌类色值适配到当前主题：暗色档原样保留，亮色档压暗。
+/// 把彩色 tint 适配到当前主题：暗色档原样保留，亮色档压暗。
 pub(crate) fn tint(color: u32, cx: &App) -> Hsla {
     let color: Hsla = rgb(color).into();
     if cx.theme().mode.is_dark() {
@@ -31,9 +31,68 @@ pub(crate) fn tint(color: u32, cx: &App) -> Hsla {
     }
 }
 
-/// 当前主题下的品牌紫。
+/// 标识色：logo、选中边框、选中导轨、计数徽章等强调位统一取主题前景色
+/// （亮档深灰 / 暗档浅灰）。去固定品牌紫是有意的克制决策——强调位与正文
+/// 同色系，视觉层级靠位置与深浅而非彩色。
 pub(crate) fn brand(cx: &App) -> Hsla {
-    tint(BRAND, cx)
+    cx.theme().foreground
+}
+
+/// 当前主题下的选中背景。用前景色低透明度叠加，保证浅色和深色都能看出层次，
+/// 同时避免直接使用 accent 在浅色档接近白色、选中态反而变得不明显。
+pub(crate) fn selection_background(cx: &App) -> Hsla {
+    cx.theme().foreground.opacity(if cx.theme().mode.is_dark() {
+        0.12
+    } else {
+        0.10
+    })
+}
+
+/// 多选但非键盘当前行的弱选中背景。
+pub(crate) fn selection_background_subtle(cx: &App) -> Hsla {
+    cx.theme().foreground.opacity(if cx.theme().mode.is_dark() {
+        0.08
+    } else {
+        0.055
+    })
+}
+
+/// 选中边缘提示，替代高对比度的整圈品牌色边框。
+pub(crate) fn selection_edge(cx: &App) -> Hsla {
+    cx.theme().foreground.opacity(if cx.theme().mode.is_dark() {
+        0.42
+    } else {
+        0.24
+    })
+}
+
+/// 顶部搜索框的轻量外观。
+///
+/// 搜索框仍保持逻辑焦点以支持唤起即输入，但不显示组件默认的双层焦点环；
+/// 静止时融入页面，鼠标经过才轻微显形。
+pub(crate) fn search_input(state: &Entity<InputState>, cx: &App) -> Div {
+    let idle_border = cx.theme().border.opacity(if cx.theme().mode.is_dark() {
+        0.16
+    } else {
+        0.14
+    });
+    let hover_border = cx.theme().border.opacity(if cx.theme().mode.is_dark() {
+        0.42
+    } else {
+        0.34
+    });
+
+    div()
+        .rounded_lg()
+        .border_1()
+        .border_color(idle_border)
+        .bg(cx.theme().background)
+        .hover(|style| {
+            style
+                .bg(cx.theme().secondary.opacity(0.16))
+                .border_color(hover_border)
+        })
+        .child(Input::new(state).appearance(false))
 }
 
 /// 当前主题下的警示琥珀。
