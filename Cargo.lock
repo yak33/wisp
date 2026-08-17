@@ -8715,6 +8715,7 @@ dependencies = [
  "smallvec",
  "tray-icon",
  "windows 0.61.3",
+ "windows-version",
  "winresource",
  "wisp-core",
 ]

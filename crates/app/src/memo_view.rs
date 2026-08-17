@@ -15,6 +15,7 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputEvent, InputState, Textarea, TextareaState},
+    menu::{ContextMenu, ContextMenuExt as _, PopupMenuItem},
     scroll::{ScrollableElement as _, ScrollbarAxis},
     tooltip::Tooltip,
     v_flex, v_virtual_list,
@@ -53,6 +54,8 @@ pub(crate) struct MemoView {
     items: Vec<Memo>,
     item_sizes: Rc<Vec<Size<Pixels>>>,
     selected: usize,
+    /// 右键菜单打开的行；用于让悬停预览暂时退场，避免两个浮层叠加。
+    context_menu_row: Option<i64>,
     scroll_handle: VirtualListScrollHandle,
     editor: Option<MemoEditor>,
     _subscriptions: Vec<Subscription>,
@@ -89,6 +92,7 @@ impl MemoView {
             items: Vec::new(),
             item_sizes: Rc::new(Vec::new()),
             selected: 0,
+            context_menu_row: None,
             scroll_handle: VirtualListScrollHandle::new(),
             editor: None,
             _subscriptions,
@@ -118,6 +122,7 @@ impl MemoView {
         self.items = self.service.list(&self.filter, &self.keyword);
         self.item_sizes = Rc::new(vec![size(ROW_WIDTH, ROW_HEIGHT); self.items.len()]);
         self.selected = self.selected.min(self.items.len().saturating_sub(1));
+        self.context_menu_row = None;
         cx.notify();
     }
 
@@ -141,14 +146,31 @@ impl MemoView {
 
     /// 交付选中项：`paste` 为真时直接粘贴到唤起前的窗口，否则仅回填剪贴板。
     fn deliver_selected(&mut self, paste: bool, cx: &mut Context<Self>) {
-        let Some(memo) = self.items.get(self.selected) else {
+        let Some(id) = self.items.get(self.selected).map(|memo| memo.id) else {
             return;
         };
-        let id = memo.id;
-        let target = paste.then(|| paste_target(cx)).flatten();
 
+        if paste {
+            self.deliver_id(id, cx);
+        } else {
+            hide_main_window(cx);
+            self.copy_id(id);
+        }
+    }
+
+    fn copy_id(&self, id: i64) {
+        if let Err(err) = self.service.paste_to(id, None) {
+            eprintln!("复制备忘失败: {err:#}");
+        }
+    }
+
+    /// 将指定备忘交付到唤起 Wisp 前的窗口；目标失效时退化为仅复制。
+    fn deliver_id(&self, id: i64, cx: &mut Context<Self>) {
+        let target = paste_target(cx);
         hide_main_window(cx);
-        _ = self.service.paste_to(id, target);
+        if let Err(err) = self.service.paste_to(id, target) {
+            eprintln!("交付备忘失败: {err:#}");
+        }
     }
 
     fn open_editor(&mut self, memo: Option<&Memo>, window: &mut Window, cx: &mut Context<Self>) {
@@ -196,6 +218,12 @@ impl MemoView {
         }
     }
 
+    fn edit_id(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(memo) = self.items.iter().find(|memo| memo.id == id).cloned() {
+            self.open_editor(Some(&memo), window, cx);
+        }
+    }
+
     fn save_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(editor) = &self.editor else {
             return;
@@ -224,11 +252,14 @@ impl MemoView {
     }
 
     fn delete_selected(&mut self, cx: &mut Context<Self>) {
-        if let Some(memo) = self.items.get(self.selected) {
-            let id = memo.id;
-            if self.service.delete(id).is_ok() {
-                self.reload(cx);
-            }
+        if let Some(id) = self.items.get(self.selected).map(|memo| memo.id) {
+            self.delete_id(id, cx);
+        }
+    }
+
+    fn delete_id(&mut self, id: i64, cx: &mut Context<Self>) {
+        if self.service.delete(id).is_ok() {
+            self.reload(cx);
         }
     }
 
@@ -353,9 +384,10 @@ impl MemoView {
             )
     }
 
-    /// 渲染一个列表项：行 + 悬停预览 + 点击交付。
-    fn render_item(&self, ix: usize, cx: &Context<Self>) -> Stateful<Div> {
+    /// 渲染一个列表项：行、悬停预览、选择/交付与右键操作。
+    fn render_item(&self, ix: usize, cx: &Context<Self>) -> ContextMenu<Stateful<Div>> {
         let memo = &self.items[ix];
+        let id = memo.id;
         let char_count = memo.content.chars().count() as i64;
         let preview = tooltip_preview(&memo.content, char_count);
         let mut footnote = row_footnote(memo);
@@ -363,22 +395,65 @@ impl MemoView {
             footnote.push_str(" · ");
         }
         footnote.push_str(&format!("共 {char_count} 字符"));
+        let entity = cx.entity();
 
         self.render_row(ix, cx)
             .id(ix)
             .tooltip_show_delay(TOOLTIP_DELAY)
-            .tooltip(move |window, cx| {
-                Tooltip::element({
-                    let preview = preview.clone();
-                    let footnote = footnote.clone();
-                    move |_, cx| memo_tooltip_body(preview.clone(), footnote.clone(), cx)
-                })
-                .build(window, cx)
+            .tooltip({
+                let entity = entity.clone();
+                move |window, cx| {
+                    if entity.read(cx).context_menu_row == Some(id) {
+                        return cx.new(|_| HiddenTooltip).into();
+                    }
+                    Tooltip::element({
+                        let preview = preview.clone();
+                        let footnote = footnote.clone();
+                        move |_, cx| memo_tooltip_body(preview.clone(), footnote.clone(), cx)
+                    })
+                    .build(window, cx)
+                }
             })
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.selected = ix;
-                this.deliver_selected(true, cx);
+            .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| {
+                if ev.click_count() >= 2 {
+                    this.deliver_id(id, cx);
+                } else {
+                    this.selected = ix;
+                    cx.notify();
+                }
             }))
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                if !hovered && this.context_menu_row == Some(id) {
+                    this.context_menu_row = None;
+                    cx.notify();
+                }
+            }))
+            .context_menu(move |menu, _, cx| {
+                entity.update(cx, |view, cx| {
+                    view.selected = ix;
+                    view.context_menu_row = Some(id);
+                    cx.notify();
+                });
+                let copy = entity.clone();
+                let paste = entity.clone();
+                let edit = entity.clone();
+                let delete = entity.clone();
+
+                menu
+                    .item(PopupMenuItem::new("复制").on_click(move |_, _, cx| {
+                        copy.update(cx, |view, _| view.copy_id(id));
+                    }))
+                    .item(PopupMenuItem::new("执行粘贴").on_click(move |_, _, cx| {
+                        paste.update(cx, |view, cx| view.deliver_id(id, cx));
+                    }))
+                    .item(PopupMenuItem::new("编辑").on_click(move |_, window, cx| {
+                        edit.update(cx, |view, cx| view.edit_id(id, window, cx));
+                    }))
+                    .item(PopupMenuItem::separator())
+                    .item(PopupMenuItem::new("删除").on_click(move |_, _, cx| {
+                        delete.update(cx, |view, cx| view.delete_id(id, cx));
+                    }))
+            })
     }
 
     fn render_list(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -602,6 +677,15 @@ fn memo_tooltip_body(preview: String, footnote: String, cx: &App) -> Div {
                 .text_color(cx.theme().muted_foreground)
                 .child(footnote),
         )
+}
+
+/// 右键菜单打开期间的悬停提示占位。
+struct HiddenTooltip;
+
+impl Render for HiddenTooltip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
 }
 
 impl Render for MemoView {

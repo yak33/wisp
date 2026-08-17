@@ -4,8 +4,18 @@
 //! 落盘存三态，激活时把 System 解析为当前系统外观。系统深浅色切换的实时跟随
 //! 由 `wisp_view` 订阅 `observe_window_appearance` 后重新激活本偏好完成。
 
+use std::sync::OnceLock;
+
 use gpui::{App, Window, rgb};
 use gpui_component::{Icon, IconName, Theme, ThemeMode};
+use windows::{
+    Win32::{
+        Foundation::HMODULE,
+        System::LibraryLoader::{GetProcAddress, LoadLibraryW},
+    },
+    core::{PCSTR, w},
+};
+use windows_version::OsVersion;
 
 use crate::{assets::WispIcon, config};
 
@@ -13,6 +23,18 @@ use crate::{assets::WispIcon, config};
 const DARK_FOREGROUND: u32 = 0xCACCCA;
 /// 深色模式辅助文字：与正文保持明确层级，同时确保小字号仍清晰可读。
 const DARK_MUTED_FOREGROUND: u32 = 0x8F8F8F;
+
+const WINDOWS_10_1809_BUILD: u32 = 17_763;
+const WINDOWS_10_1903_BUILD: u32 = 18_362;
+const UXTHEME_REFRESH_IMMERSIVE_COLOR_POLICY_STATE: u16 = 104;
+const UXTHEME_SET_PREFERRED_APP_MODE: u16 = 135;
+const UXTHEME_FLUSH_MENU_THEMES: u16 = 136;
+
+/// Windows 10 1903+ 的 PreferredAppMode。使用整数边界避免把未公开 ABI
+/// 建模为 Rust enum 后引入无效判别值风险。
+const APP_MODE_ALLOW_DARK: i32 = 1;
+const APP_MODE_FORCE_DARK: i32 = 2;
+const APP_MODE_FORCE_LIGHT: i32 = 3;
 
 /// 用户选择的主题偏好。点击标题栏按钮按 System → Light → Dark 循环。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -95,7 +117,82 @@ impl ThemePreference {
             Self::Dark => Theme::change(ThemeMode::Dark, window, cx),
         }
         soften_dark_foreground(cx);
+        sync_native_menu_theme(self);
     }
+
+    fn native_app_mode(self) -> i32 {
+        match self {
+            Self::System => APP_MODE_ALLOW_DARK,
+            Self::Light => APP_MODE_FORCE_LIGHT,
+            Self::Dark => APP_MODE_FORCE_DARK,
+        }
+    }
+}
+
+/// 让 Win32 `TrackPopupMenu` 与 Wisp 主题同步。
+///
+/// `tray-icon/muda` 暴露的 `MenuTheme` 只影响窗口菜单栏，托盘右键菜单仍由
+/// uxtheme 按进程偏好绘制。这里在主题激活边界一次性同步并清空菜单主题缓存；
+/// API 在旧系统上不可用时静默降级为系统默认外观。
+fn sync_native_menu_theme(preference: ThemePreference) {
+    let version = OsVersion::current();
+    if version.major < 10 || version.build < WINDOWS_10_1809_BUILD {
+        return;
+    }
+
+    let Some(module) = uxtheme_module() else {
+        return;
+    };
+
+    unsafe {
+        if version.build >= WINDOWS_10_1903_BUILD {
+            type SetPreferredAppMode = unsafe extern "system" fn(i32) -> i32;
+            if let Some(entry) = uxtheme_proc(module, UXTHEME_SET_PREFERRED_APP_MODE) {
+                let set_preferred_app_mode: SetPreferredAppMode = std::mem::transmute(entry);
+                _ = set_preferred_app_mode(preference.native_app_mode());
+            }
+        } else {
+            // Windows 10 1809 的 ordinal 135 仍是 bool 形态，只能允许/禁止暗色，
+            // 无法在浅色系统上强制暗色。
+            type AllowDarkModeForApp = unsafe extern "system" fn(bool) -> bool;
+            if let Some(entry) = uxtheme_proc(module, UXTHEME_SET_PREFERRED_APP_MODE) {
+                let allow_dark_mode_for_app: AllowDarkModeForApp = std::mem::transmute(entry);
+                _ = allow_dark_mode_for_app(preference != ThemePreference::Light);
+            }
+        }
+
+        type RefreshImmersiveColorPolicyState = unsafe extern "system" fn();
+        if let Some(entry) = uxtheme_proc(module, UXTHEME_REFRESH_IMMERSIVE_COLOR_POLICY_STATE) {
+            let refresh: RefreshImmersiveColorPolicyState = std::mem::transmute(entry);
+            refresh();
+        }
+
+        type FlushMenuThemes = unsafe extern "system" fn();
+        if let Some(entry) = uxtheme_proc(module, UXTHEME_FLUSH_MENU_THEMES) {
+            let flush: FlushMenuThemes = std::mem::transmute(entry);
+            flush();
+        }
+    }
+}
+
+fn uxtheme_module() -> Option<HMODULE> {
+    static MODULE: OnceLock<Option<usize>> = OnceLock::new();
+    let raw = MODULE
+        .get_or_init(|| unsafe {
+            LoadLibraryW(w!("uxtheme.dll"))
+                .ok()
+                .map(|module| module.0 as usize)
+        })
+        .as_ref()
+        .copied()?;
+    Some(HMODULE(raw as *mut _))
+}
+
+unsafe fn uxtheme_proc(
+    module: HMODULE,
+    ordinal: u16,
+) -> Option<unsafe extern "system" fn() -> isize> {
+    unsafe { GetProcAddress(module, PCSTR::from_raw(ordinal as usize as *const u8)) }
 }
 
 /// 收敛暗色主题的文字亮度。
@@ -154,5 +251,12 @@ mod tests {
             ]
         );
         assert_eq!(start.next().next().next(), start);
+    }
+
+    #[test]
+    fn native_menu_modes_preserve_all_three_theme_intents() {
+        assert_eq!(ThemePreference::System.native_app_mode(), APP_MODE_ALLOW_DARK);
+        assert_eq!(ThemePreference::Light.native_app_mode(), APP_MODE_FORCE_LIGHT);
+        assert_eq!(ThemePreference::Dark.native_app_mode(), APP_MODE_FORCE_DARK);
     }
 }

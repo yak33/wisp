@@ -24,6 +24,7 @@ use gpui_component::{
 use wisp_core::{Clip, ClipFilter, ClipKind, ClipboardService};
 
 use crate::{
+    assets::WispIcon,
     hide_main_window, paste_target,
     ui::{
         brand, kbd_pill, search_input, selection_background, selection_background_subtle,
@@ -188,13 +189,13 @@ impl ClipboardView {
             let view = view.clone();
             dialog
                 .icon(Icon::new(IconName::TriangleAlert).text_color(warning(cx)))
-                .title("清空剪贴板历史")
+                .title("清空剪贴板")
                 .description(format!(
                     "将删除 {count} 条未收藏记录，收藏内容会保留。此操作无法撤销。"
                 ))
                 .button_props(
                     DialogButtonProps::default()
-                        .ok_text("清空历史")
+                        .ok_text("确认清空")
                         .ok_variant(ButtonVariant::Danger)
                         .cancel_text("取消")
                         .show_cancel(true),
@@ -677,12 +678,12 @@ impl Render for ClipboardView {
                             .child(
                                 Button::new("clear-history")
                                     .ghost()
-                                    .xsmall()
-                                    .icon(IconName::Delete)
+                                    .small()
+                                    .icon(WispIcon::Trash)
                                     .tooltip(if self.unpinned_count == 0 {
                                         "暂无可清空的历史"
                                     } else {
-                                        "清空历史（保留收藏）"
+                                        "清空剪贴板"
                                     })
                                     .disabled(self.unpinned_count == 0)
                                     .on_click(cx.listener(|this, _, window, cx| {
