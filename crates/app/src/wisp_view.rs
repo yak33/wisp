@@ -14,9 +14,16 @@ use gpui_component::{
 use wisp_core::{ClipboardService, MemoService};
 
 use crate::{
-    WakeHotkey, assets::WispIcon, clipboard_view::ClipboardView, config,
-    hide_main_window, home_view::{HomeView, OpenFeature}, memo_view::MemoView,
-    settings_view::SettingsView, theme::ThemePreference, ui::brand,
+    WakeHotkey,
+    assets::WispIcon,
+    clipboard_view::ClipboardView,
+    config, hide_main_window,
+    home_view::{HomeView, OpenFeature},
+    ip_view::IpView,
+    memo_view::MemoView,
+    settings_view::SettingsView,
+    theme::ThemePreference,
+    ui::brand,
 };
 
 /// 一级页面。上次所在的功能页会持久化，重启后原样恢复；
@@ -26,6 +33,7 @@ pub(crate) enum Page {
     Home,
     Clipboard,
     Memo,
+    Ip,
     Settings,
 }
 
@@ -35,6 +43,7 @@ impl Page {
             Self::Home => "Wisp",
             Self::Clipboard => "剪贴板",
             Self::Memo => "备忘快贴",
+            Self::Ip => "IP 工具",
             Self::Settings => "设置",
         }
     }
@@ -44,6 +53,7 @@ impl Page {
             Self::Home => "home",
             Self::Clipboard => "clipboard",
             Self::Memo => "memo",
+            Self::Ip => "ip",
             Self::Settings => "settings",
         }
     }
@@ -53,6 +63,7 @@ impl Page {
             "home" => Some(Self::Home),
             "clipboard" => Some(Self::Clipboard),
             "memo" => Some(Self::Memo),
+            "ip" => Some(Self::Ip),
             _ => None,
         }
     }
@@ -63,6 +74,7 @@ pub(crate) struct WispView {
     home: Entity<HomeView>,
     clipboard: Entity<ClipboardView>,
     memos: Entity<MemoView>,
+    ip: Entity<IpView>,
     settings: Entity<SettingsView>,
     auto_hide: bool,
     _subscriptions: Vec<Subscription>,
@@ -78,23 +90,21 @@ impl WispView {
         let home = cx.new(|cx| HomeView::new(window, cx));
         let clipboard = cx.new(|cx| ClipboardView::new(clipboard_service, window, cx));
         let memos = cx.new(|cx| MemoView::new(memo_service, window, cx));
+        let ip = cx.new(IpView::new);
         let settings = cx.new(|cx| SettingsView::new(window, cx));
 
         // 首帧之前激活上次的主题偏好，避免启动瞬间的明暗闪跳
         ThemePreference::current(cx).activate(Some(&mut *window), cx);
 
         let _subscriptions = vec![
-            cx.observe_window_activation(
-                window,
-                |this: &mut Self, window, cx| {
-                    if window.is_window_active() {
-                        this.focus_active_page(window, cx);
-                        this.reload_active_page(cx);
-                    } else if this.auto_hide {
-                        hide_main_window(cx);
-                    }
-                },
-            ),
+            cx.observe_window_activation(window, |this: &mut Self, window, cx| {
+                if window.is_window_active() {
+                    this.focus_active_page(window, cx);
+                    this.reload_active_page(cx);
+                } else if this.auto_hide {
+                    hide_main_window(cx);
+                }
+            }),
             // 系统深浅色切换（WM_SETTINGCHANGE / ImmersiveColorSet）：
             // 仅"跟随系统"档需要响应，显式选定亮/暗时用户意图优先
             cx.observe_window_appearance(window, |_, window, cx| {
@@ -108,6 +118,7 @@ impl WispView {
                 let page = match event {
                     OpenFeature::Clipboard => Page::Clipboard,
                     OpenFeature::Memo => Page::Memo,
+                    OpenFeature::Ip => Page::Ip,
                 };
                 this.open_page(page, window, cx);
             }),
@@ -119,6 +130,7 @@ impl WispView {
             home,
             clipboard,
             memos,
+            ip,
             settings,
             auto_hide: true,
             _subscriptions,
@@ -137,6 +149,7 @@ impl WispView {
             Page::Home => self.home.update(cx, |view, cx| view.reload(cx)),
             Page::Clipboard => self.clipboard.update(cx, |view, cx| view.reload(cx)),
             Page::Memo => self.memos.update(cx, |view, cx| view.reload(cx)),
+            Page::Ip => self.ip.update(cx, |view, cx| view.reload(cx)),
             // 设置页所有状态现读现显，无需刷新
             Page::Settings => {}
         }
@@ -153,9 +166,8 @@ impl WispView {
             Page::Memo => self
                 .memos
                 .update(cx, |view, cx| view.focus_search(window, cx)),
-            Page::Settings => self
-                .settings
-                .update(cx, |view, cx| view.focus(window, cx)),
+            Page::Ip => self.ip.update(cx, |view, cx| view.focus(window, cx)),
+            Page::Settings => self.settings.update(cx, |view, cx| view.focus(window, cx)),
         }
     }
 
@@ -208,6 +220,7 @@ impl Render for WispView {
                     match ev.keystroke.key.as_str() {
                         "1" => this.open_page(Page::Clipboard, window, cx),
                         "2" => this.open_page(Page::Memo, window, cx),
+                        "3" => this.open_page(Page::Ip, window, cx),
                         "," => this.open_page(Page::Settings, window, cx),
                         _ => {}
                     }
@@ -269,12 +282,7 @@ impl Render for WispView {
                                             .child("/"),
                                     )
                             })
-                            .child(
-                                div()
-                                    .font_semibold()
-                                    .text_sm()
-                                    .child(self.page.title()),
-                            ),
+                            .child(div().font_semibold().text_sm().child(self.page.title())),
                     )
                     .child(
                         h_flex()
@@ -330,16 +338,12 @@ impl Render for WispView {
                             ),
                     ),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .map(|body| match self.page {
-                        Page::Home => body.child(self.home.clone()),
-                        Page::Clipboard => body.child(self.clipboard.clone()),
-                        Page::Memo => body.child(self.memos.clone()),
-                        Page::Settings => body.child(self.settings.clone()),
-                    }),
-            )
+            .child(div().flex_1().min_h_0().map(|body| match self.page {
+                Page::Home => body.child(self.home.clone()),
+                Page::Clipboard => body.child(self.clipboard.clone()),
+                Page::Memo => body.child(self.memos.clone()),
+                Page::Ip => body.child(self.ip.clone()),
+                Page::Settings => body.child(self.settings.clone()),
+            }))
     }
 }

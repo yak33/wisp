@@ -3,11 +3,7 @@
 //! 与剪贴板共用同一个 SQLite 文件（WAL 模式下多连接读写安全），
 //! 但表与连接彼此独立，两个功能互不阻塞。
 
-use std::{
-    path::Path,
-    sync::Mutex,
-    time::Duration,
-};
+use std::{path::Path, sync::Mutex, time::Duration};
 
 use anyhow::{Context as _, Result};
 use rusqlite::{Connection, params, params_from_iter};
@@ -171,7 +167,10 @@ impl MemoStore {
 
         tx.execute("DELETE FROM memo_tags WHERE memo_id = ?1", params![id])?;
         for tag in &draft.tags {
-            tx.execute("INSERT OR IGNORE INTO tags (name) VALUES (?1)", params![tag])?;
+            tx.execute(
+                "INSERT OR IGNORE INTO tags (name) VALUES (?1)",
+                params![tag],
+            )?;
             tx.execute(
                 "INSERT OR IGNORE INTO memo_tags (memo_id, tag_id)
                  VALUES (?1, (SELECT id FROM tags WHERE name = ?2))",

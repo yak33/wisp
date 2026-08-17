@@ -3,11 +3,7 @@
 //! 两种形态共用一个视图——列表态浏览与检索，编辑态新建与修改，
 //! 由 [`MemoView::editor`] 是否存在切换。
 
-use std::{
-    rc::Rc,
-    sync::Arc,
-    time::Duration,
-};
+use std::{rc::Rc, sync::Arc, time::Duration};
 
 use gpui::{prelude::FluentBuilder as _, *};
 use gpui_component::{
@@ -272,11 +268,13 @@ impl MemoView {
         ]
         .into_iter()
         .map(|(name, count, filter)| (name.to_string(), count, filter))
-        .chain(
-            self.tags
-                .iter()
-                .map(|tag| (tag.name.clone(), tag.count, TagFilter::Named(tag.name.clone()))),
-        );
+        .chain(self.tags.iter().map(|tag| {
+            (
+                tag.name.clone(),
+                tag.count,
+                TagFilter::Named(tag.name.clone()),
+            )
+        }));
 
         v_flex()
             .w(SIDEBAR_WIDTH)
@@ -439,54 +437,50 @@ impl MemoView {
                 let edit = entity.clone();
                 let delete = entity.clone();
 
-                menu
-                    .item(PopupMenuItem::new("复制").on_click(move |_, _, cx| {
-                        copy.update(cx, |view, _| view.copy_id(id));
-                    }))
-                    .item(PopupMenuItem::new("执行粘贴").on_click(move |_, _, cx| {
-                        paste.update(cx, |view, cx| view.deliver_id(id, cx));
-                    }))
-                    .item(PopupMenuItem::new("编辑").on_click(move |_, window, cx| {
-                        edit.update(cx, |view, cx| view.edit_id(id, window, cx));
-                    }))
-                    .item(PopupMenuItem::separator())
-                    .item(PopupMenuItem::new("删除").on_click(move |_, _, cx| {
-                        delete.update(cx, |view, cx| view.delete_id(id, cx));
-                    }))
+                menu.item(PopupMenuItem::new("复制").on_click(move |_, _, cx| {
+                    copy.update(cx, |view, _| view.copy_id(id));
+                }))
+                .item(PopupMenuItem::new("执行粘贴").on_click(move |_, _, cx| {
+                    paste.update(cx, |view, cx| view.deliver_id(id, cx));
+                }))
+                .item(PopupMenuItem::new("编辑").on_click(move |_, window, cx| {
+                    edit.update(cx, |view, cx| view.edit_id(id, window, cx));
+                }))
+                .item(PopupMenuItem::separator())
+                .item(PopupMenuItem::new("删除").on_click(move |_, _, cx| {
+                    delete.update(cx, |view, cx| view.delete_id(id, cx));
+                }))
             })
     }
 
     fn render_list(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex_1()
-            .min_h_0()
-            .child(
-                div().relative().size_full().child(
-                    v_flex()
-                        .id("memo-list")
-                        .relative()
-                        .size_full()
-                        .child(
-                            v_virtual_list(
-                                cx.entity().clone(),
-                                "memo-items",
-                                self.item_sizes.clone(),
-                                |this, visible_range, _, cx| {
-                                    visible_range
-                                        .filter_map(|ix| {
-                                            if ix >= this.items.len() {
-                                                return None;
-                                            }
-                                            Some(this.render_item(ix, cx))
-                                        })
-                                        .collect()
-                                },
-                            )
-                            .track_scroll(&self.scroll_handle),
+        div().flex_1().min_h_0().child(
+            div().relative().size_full().child(
+                v_flex()
+                    .id("memo-list")
+                    .relative()
+                    .size_full()
+                    .child(
+                        v_virtual_list(
+                            cx.entity().clone(),
+                            "memo-items",
+                            self.item_sizes.clone(),
+                            |this, visible_range, _, cx| {
+                                visible_range
+                                    .filter_map(|ix| {
+                                        if ix >= this.items.len() {
+                                            return None;
+                                        }
+                                        Some(this.render_item(ix, cx))
+                                    })
+                                    .collect()
+                            },
                         )
-                        .scrollbar(&self.scroll_handle, ScrollbarAxis::Vertical),
-                ),
-            )
+                        .track_scroll(&self.scroll_handle),
+                    )
+                    .scrollbar(&self.scroll_handle, ScrollbarAxis::Vertical),
+            ),
+        )
     }
 
     fn render_editor(&self, editor: &MemoEditor, cx: &mut Context<Self>) -> impl IntoElement {
@@ -500,12 +494,11 @@ impl MemoView {
                 h_flex()
                     .justify_between()
                     .items_center()
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_semibold()
-                            .child(if is_new { "新建备忘" } else { "编辑备忘" }),
-                    )
+                    .child(div().text_sm().font_semibold().child(if is_new {
+                        "新建备忘"
+                    } else {
+                        "编辑备忘"
+                    }))
                     .child(
                         h_flex()
                             .gap_2()
@@ -530,18 +523,18 @@ impl MemoView {
                             .primary()
                             .small()
                             .label("保存备忘")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.save_editor(window, cx)
-                            })),
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.save_editor(window, cx)),
+                            ),
                     )
                     .child(
                         Button::new("memo-cancel")
                             .ghost()
                             .small()
                             .label("取消")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.close_editor(window, cx)
-                            })),
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.close_editor(window, cx)),
+                            ),
                     ),
             )
     }
@@ -575,9 +568,9 @@ impl MemoView {
                             .xsmall()
                             .label("编辑")
                             .disabled(!has_selection)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.edit_selected(window, cx)
-                            })),
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.edit_selected(window, cx)),
+                            ),
                     )
                     .child(
                         Button::new("memo-delete")
@@ -668,7 +661,11 @@ fn memo_tooltip_body(preview: String, footnote: String, cx: &App) -> Div {
                 .text_sm()
                 .line_height(relative(1.5))
                 .children(preview.lines().map(|line| {
-                    div().child(if line.is_empty() { " ".to_string() } else { line.to_string() })
+                    div().child(if line.is_empty() {
+                        " ".to_string()
+                    } else {
+                        line.to_string()
+                    })
                 })),
         )
         .child(

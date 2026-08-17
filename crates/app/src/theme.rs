@@ -255,8 +255,14 @@ mod tests {
 
     #[test]
     fn native_menu_modes_preserve_all_three_theme_intents() {
-        assert_eq!(ThemePreference::System.native_app_mode(), APP_MODE_ALLOW_DARK);
-        assert_eq!(ThemePreference::Light.native_app_mode(), APP_MODE_FORCE_LIGHT);
+        assert_eq!(
+            ThemePreference::System.native_app_mode(),
+            APP_MODE_ALLOW_DARK
+        );
+        assert_eq!(
+            ThemePreference::Light.native_app_mode(),
+            APP_MODE_FORCE_LIGHT
+        );
         assert_eq!(ThemePreference::Dark.native_app_mode(), APP_MODE_FORCE_DARK);
     }
 }

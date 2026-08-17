@@ -76,10 +76,8 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .expect("系统时间应晚于 Unix Epoch")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "wisp-config-{}-{unique}.cfg",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("wisp-config-{}-{unique}.cfg", std::process::id()));
 
         let mut config = Config::load(&path);
         config.set("theme", "dark");

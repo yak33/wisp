@@ -21,10 +21,10 @@ use gpui_component::{
 };
 
 use crate::{
-    autostart_enabled, config, hotkey, rebind_wake_hotkey, refresh_tray, resume_wake_hotkey,
-    set_autostart, set_tray_visible, suspend_wake_hotkey, theme::ThemePreference,
+    WakeHotkey, autostart_enabled, config, hotkey, rebind_wake_hotkey, refresh_tray,
+    resume_wake_hotkey, set_autostart, set_tray_visible, suspend_wake_hotkey,
+    theme::ThemePreference,
     ui::{brand, kbd_pill},
-    WakeHotkey,
 };
 
 const REPO_URL: &str = "https://github.com/yak33/wisp";
@@ -126,15 +126,13 @@ impl SettingsView {
 
     /// 小节骨架：分组标题 + 内容行。
     fn section(title: &'static str, cx: &App) -> Div {
-        v_flex()
-            .gap_1p5()
-            .child(
-                div()
-                    .text_xs()
-                    .font_medium()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(title),
-            )
+        v_flex().gap_1p5().child(
+            div()
+                .text_xs()
+                .font_medium()
+                .text_color(cx.theme().muted_foreground)
+                .child(title),
+        )
     }
 
     /// 设置行骨架：左侧名称与说明，右侧控件。
@@ -149,15 +147,12 @@ impl SettingsView {
             .border_1()
             .border_color(cx.theme().border.opacity(0.35))
             .child(
-                v_flex()
-                    .gap_0p5()
-                    .child(div().text_sm().child(name))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(desc),
-                    ),
+                v_flex().gap_0p5().child(div().text_sm().child(name)).child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(desc),
+                ),
             )
     }
 
@@ -166,66 +161,67 @@ impl SettingsView {
             .try_global::<WakeHotkey>()
             .map_or_else(|| "未注册".to_string(), |k| k.label.clone());
 
-        Self::section("唤起快捷键", cx).child(
-            Self::row("全局唤起", "在任意程序中按下即可显示 / 隐藏 Wisp", cx).child(
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .when(self.recording, |controls| {
-                        controls
-                            .child(
-                                div()
-                                    .px_2()
-                                    .py_0p5()
-                                    .rounded(px(4.))
-                                    .text_xs()
-                                    .bg(brand(cx).opacity(0.15))
-                                    .text_color(brand(cx))
-                                    .child("按下新组合，Esc 取消"),
-                            )
-                            .child(
-                                Button::new("cancel-record")
-                                    .ghost()
-                                    .xsmall()
-                                    .label("取消")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.cancel_recording(cx)
-                                    })),
-                            )
-                    })
-                    .when(!self.recording, |controls| {
-                        controls
-                            .child(kbd_pill(label, cx))
-                            .child(
-                                Button::new("record-hotkey")
-                                    .outline()
-                                    .xsmall()
-                                    .label("修改")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.start_recording(window, cx)
-                                    })),
-                            )
-                            .child(
-                                Button::new("reset-hotkey")
-                                    .ghost()
-                                    .xsmall()
-                                    .label("恢复默认")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.restore_default_hotkey(cx)
-                                    })),
-                            )
-                    }),
-            ),
-        )
-        .when_some(self.error, |section, message| {
-            section.child(
-                div()
-                    .px_3()
-                    .text_xs()
-                    .text_color(cx.theme().danger)
-                    .child(message),
+        Self::section("唤起快捷键", cx)
+            .child(
+                Self::row("全局唤起", "在任意程序中按下即可显示 / 隐藏 Wisp", cx).child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .when(self.recording, |controls| {
+                            controls
+                                .child(
+                                    div()
+                                        .px_2()
+                                        .py_0p5()
+                                        .rounded(px(4.))
+                                        .text_xs()
+                                        .bg(brand(cx).opacity(0.15))
+                                        .text_color(brand(cx))
+                                        .child("按下新组合，Esc 取消"),
+                                )
+                                .child(
+                                    Button::new("cancel-record")
+                                        .ghost()
+                                        .xsmall()
+                                        .label("取消")
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| this.cancel_recording(cx)),
+                                        ),
+                                )
+                        })
+                        .when(!self.recording, |controls| {
+                            controls
+                                .child(kbd_pill(label, cx))
+                                .child(
+                                    Button::new("record-hotkey")
+                                        .outline()
+                                        .xsmall()
+                                        .label("修改")
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.start_recording(window, cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new("reset-hotkey")
+                                        .ghost()
+                                        .xsmall()
+                                        .label("恢复默认")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.restore_default_hotkey(cx)
+                                        })),
+                                )
+                        }),
+                ),
             )
-        })
+            .when_some(self.error, |section, message| {
+                section.child(
+                    div()
+                        .px_3()
+                        .text_xs()
+                        .text_color(cx.theme().danger)
+                        .child(message),
+                )
+            })
     }
 
     fn render_general_section(&self, cx: &Context<Self>) -> Div {
@@ -261,8 +257,8 @@ impl SettingsView {
         let current = ThemePreference::current(cx);
 
         Self::section("外观", cx).child(
-            Self::row("主题", "与标题栏按钮等效", cx).child(
-                h_flex().gap_1().children(ThemePreference::ALL.map(|preference| {
+            Self::row("主题", "与标题栏按钮等效", cx).child(h_flex().gap_1().children(
+                ThemePreference::ALL.map(|preference| {
                     let active = preference == current;
                     h_flex()
                         .id(preference.key())
@@ -288,8 +284,8 @@ impl SettingsView {
                             preference.select(Some(window), cx);
                             cx.notify();
                         }))
-                })),
-            ),
+                }),
+            )),
         )
     }
 

@@ -8,6 +8,7 @@ mod clipboard_view;
 mod config;
 mod home_view;
 mod hotkey;
+mod ip_view;
 mod memo_view;
 mod settings_view;
 mod theme;
@@ -29,14 +30,14 @@ use windows::{
         Foundation::{ERROR_ALREADY_EXISTS, ERROR_SUCCESS, GetLastError, HANDLE, HWND},
         System::{
             Registry::{
-                HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, RegCloseKey, RegDeleteValueW,
-                RegGetValueW, RegOpenKeyExW, RegSetValueExW, REG_SZ, RRF_RT_REG_SZ,
+                HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_SZ, RRF_RT_REG_SZ, RegCloseKey,
+                RegDeleteValueW, RegGetValueW, RegOpenKeyExW, RegSetValueExW,
             },
             Threading::CreateMutexW,
         },
         UI::WindowsAndMessaging::{
-            IsWindowVisible, MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND, MessageBoxW,
-            SetForegroundWindow, ShowWindow, SW_HIDE, SW_SHOW,
+            IsWindowVisible, MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND, MessageBoxW, SW_HIDE,
+            SW_SHOW, SetForegroundWindow, ShowWindow,
         },
     },
     core::{HSTRING, w},
@@ -241,8 +242,7 @@ pub(crate) fn set_autostart(enabled: bool) -> bool {
         }
 
         let result = if enabled {
-            let bytes =
-                std::slice::from_raw_parts(wide.as_ptr().cast::<u8>(), wide.len() * 2);
+            let bytes = std::slice::from_raw_parts(wide.as_ptr().cast::<u8>(), wide.len() * 2);
             RegSetValueExW(key, w!("Wisp"), None, REG_SZ, Some(bytes))
         } else {
             RegDeleteValueW(key, w!("Wisp"))
@@ -260,17 +260,20 @@ fn build_tray_menu() -> Menu {
     let section_modules = PredefinedMenuItem::separator();
     let clipboard = MenuItem::with_id("clipboard", "剪贴板历史", true, None);
     let memo = MenuItem::with_id("memo", "备忘快贴", true, None);
+    let ip = MenuItem::with_id("ip", "IP 工具", true, None);
     let section_app = PredefinedMenuItem::separator();
     let settings = MenuItem::with_id("settings", "设置", true, None);
     let about = MenuItem::with_id("about", "关于", true, None);
     let section_system = PredefinedMenuItem::separator();
-    let autostart = CheckMenuItem::with_id("autostart", "开机自启", true, autostart_enabled(), None);
+    let autostart =
+        CheckMenuItem::with_id("autostart", "开机自启", true, autostart_enabled(), None);
     let quit = MenuItem::with_id("quit", "退出 Wisp", true, None);
     menu.append_items(&[
         &toggle,
         &section_modules,
         &clipboard,
         &memo,
+        &ip,
         &section_app,
         &settings,
         &about,
@@ -278,7 +281,7 @@ fn build_tray_menu() -> Menu {
         &autostart,
         &quit,
     ])
-        .expect("托盘菜单构建失败");
+    .expect("托盘菜单构建失败");
     menu
 }
 
@@ -400,9 +403,8 @@ fn main() {
         // 剪贴板服务：监听/入库在 core 的独立线程，变更信号进壳层事件泵
         let (changed_tx, changed_rx) = crossbeam_channel::unbounded::<()>();
         let db_path = db_path();
-        let clipboard_service = Arc::new(
-            ClipboardService::start(&db_path, changed_tx).expect("启动剪贴板服务失败"),
-        );
+        let clipboard_service =
+            Arc::new(ClipboardService::start(&db_path, changed_tx).expect("启动剪贴板服务失败"));
         let memo_service = Arc::new(MemoService::open(&db_path).expect("打开备忘库失败"));
         // 与数据库同目录的轻量配置（上次页面等），进程重启后恢复
         let config = Config::load(&db_path.with_file_name("wisp.cfg"));
@@ -486,6 +488,7 @@ fn main() {
                 "toggle" => _ = event_tx.try_send(ShellEvent::Toggle),
                 "clipboard" => _ = event_tx.try_send(ShellEvent::OpenPage(Page::Clipboard)),
                 "memo" => _ = event_tx.try_send(ShellEvent::OpenPage(Page::Memo)),
+                "ip" => _ = event_tx.try_send(ShellEvent::OpenPage(Page::Ip)),
                 "settings" => _ = event_tx.try_send(ShellEvent::OpenPage(Page::Settings)),
                 "about" => _ = event_tx.try_send(ShellEvent::About),
                 "autostart" => _ = event_tx.try_send(ShellEvent::ToggleAutostart),

@@ -15,7 +15,10 @@ fn main() {
         )
         .expect("查询失败");
 
-    println!("{:<5} {:<5} {:<6} {:<8} {:<10} preview", "id", "kind", "pinned", "thumb", "content");
+    println!(
+        "{:<5} {:<5} {:<6} {:<8} {:<10} preview",
+        "id", "kind", "pinned", "thumb", "content"
+    );
     let rows = stmt
         .query_map([], |row| {
             Ok(format!(

@@ -99,7 +99,13 @@ impl ClipStore {
     /// 图像入库。同一哈希（FNV-1a 64，同图异码概率可忽略）只刷新时间戳
     /// 置顶，不做逐字节回比——图像不像文本有廉价的原文比对。
     /// `content` 为原图落盘路径，`preview` 为"宽×高 · 体积"摘要。
-    pub fn insert_image(&self, hash: i64, content: &str, preview: &str, thumb: &[u8]) -> Result<()> {
+    pub fn insert_image(
+        &self,
+        hash: i64,
+        content: &str,
+        preview: &str,
+        thumb: &[u8],
+    ) -> Result<()> {
         let conn = self.conn.lock().expect("clip store poisoned");
         let now = now_ms();
 
@@ -202,12 +208,7 @@ impl ClipStore {
         Ok(conn.query_row(
             "SELECT kind, content FROM clips WHERE id = ?1",
             params![id],
-            |row| {
-                Ok((
-                    ClipKind::from_i64(row.get(0)?),
-                    row.get::<_, String>(1)?,
-                ))
-            },
+            |row| Ok((ClipKind::from_i64(row.get(0)?), row.get::<_, String>(1)?)),
         )?)
     }
 
@@ -490,7 +491,12 @@ mod tests {
 
         let hit = store.query(ClipFilter::Pinned, "收藏", 10).unwrap();
         assert_eq!(hit.len(), 1);
-        assert!(store.query(ClipFilter::Pinned, "普通", 10).unwrap().is_empty());
+        assert!(
+            store
+                .query(ClipFilter::Pinned, "普通", 10)
+                .unwrap()
+                .is_empty()
+        );
 
         // 文本分类命中全部文本条目；图像分类暂为空（M3 落地后自动出现）
         assert_eq!(store.query(ClipFilter::Text, "", 10).unwrap().len(), 2);
@@ -608,7 +614,9 @@ mod tests {
             .insert_image(0xff, r"C:\Wisp\images\00ff.png", "800×600 · 12.3 KB", b"t")
             .unwrap();
         store.insert_text("文本").unwrap();
-        store.insert_files(77, "C:\\a\\报告.docx", "报告.docx").unwrap();
+        store
+            .insert_files(77, "C:\\a\\报告.docx", "报告.docx")
+            .unwrap();
 
         assert_eq!(
             store.image_file_names().unwrap(),

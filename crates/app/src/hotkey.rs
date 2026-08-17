@@ -16,8 +16,19 @@ pub(crate) const DEFAULT_CANDIDATES: [&str; 3] = ["Alt+Space", "Ctrl+Alt+Space",
 /// 页内已占用的组合。全局快捷键不分焦点一律触发，若与页内键位重合，
 /// 用户在应用内按该键会同时触发唤起切换与页内动作。
 const RESERVED: [&str; 13] = [
-    "Ctrl+1", "Ctrl+2", "Ctrl+P", "Ctrl+N", "Ctrl+E", "Ctrl+S", "Ctrl+Enter", "Ctrl+,",
-    "Alt+1", "Alt+2", "Alt+3", "Alt+4", "Alt+5",
+    "Ctrl+1",
+    "Ctrl+2",
+    "Ctrl+P",
+    "Ctrl+N",
+    "Ctrl+E",
+    "Ctrl+S",
+    "Ctrl+Enter",
+    "Ctrl+,",
+    "Alt+1",
+    "Alt+2",
+    "Alt+3",
+    "Alt+4",
+    "Alt+5",
 ];
 
 /// 录制被拒的原因，文案直接呈现给用户。
@@ -165,11 +176,20 @@ mod tests {
     fn rejects_illegal_combinations() {
         let cases = [
             // 裸键与纯 Shift 会吞掉正常输入
-            (((false, false, false, false), "a"), Rejection::NeedsModifier),
+            (
+                ((false, false, false, false), "a"),
+                Rejection::NeedsModifier,
+            ),
             (((false, false, true, false), "a"), Rejection::NeedsModifier),
             // 还没按主键
-            (((true, false, false, false), "control"), Rejection::ModifierOnly),
-            (((false, true, false, false), "alt"), Rejection::ModifierOnly),
+            (
+                ((true, false, false, false), "control"),
+                Rejection::ModifierOnly,
+            ),
+            (
+                ((false, true, false, false), "alt"),
+                Rejection::ModifierOnly,
+            ),
             // 与页内键位冲突
             (((true, false, false, false), "1"), Rejection::Reserved),
             (((false, true, false, false), "5"), Rejection::Reserved),
@@ -177,7 +197,11 @@ mod tests {
         ];
 
         for ((mods, key), expected) in cases {
-            assert_eq!(from_keystroke(&stroke(mods, key)), Err(expected), "键 {key}");
+            assert_eq!(
+                from_keystroke(&stroke(mods, key)),
+                Err(expected),
+                "键 {key}"
+            );
         }
     }
 

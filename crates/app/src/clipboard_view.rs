@@ -70,7 +70,11 @@ pub(crate) struct ClipboardView {
 }
 
 impl ClipboardView {
-    pub fn new(service: Arc<ClipboardService>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        service: Arc<ClipboardService>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let input_state =
             cx.new(|cx| InputState::new(window, cx).placeholder("搜索剪贴板历史，回车粘贴选中项…"));
 
@@ -344,9 +348,10 @@ impl ClipboardView {
                         .border_1()
                         .border_color(cx.theme().border.opacity(0.4))
                         .overflow_hidden()
-                        .when_some(self.thumb_image(clip.id, clip.thumb.as_deref()), |cell, image| {
-                            cell.child(img(image).size_full())
-                        }),
+                        .when_some(
+                            self.thumb_image(clip.id, clip.thumb.as_deref()),
+                            |cell, image| cell.child(img(image).size_full()),
+                        ),
                 )
             })
             .when(!is_image, |row| {
@@ -414,9 +419,10 @@ impl ClipboardView {
             clip.content
                 .lines()
                 .map(|line| {
-                    std::path::Path::new(line)
-                        .file_name()
-                        .map_or_else(|| line.to_string(), |name| name.to_string_lossy().into_owned())
+                    std::path::Path::new(line).file_name().map_or_else(
+                        || line.to_string(),
+                        |name| name.to_string_lossy().into_owned(),
+                    )
                 })
                 .collect::<Vec<String>>()
         });
@@ -497,32 +503,31 @@ impl ClipboardView {
                 let paste = entity.clone();
                 let pin = entity.clone();
                 let del = entity.clone();
-                menu
-                    .item(PopupMenuItem::new("复制").on_click(move |_, _, cx| {
-                        copy.update(cx, |view, _| _ = view.service.copy_to_clipboard(id));
-                    }))
-                    .item(PopupMenuItem::new("执行粘贴").on_click(move |_, _, cx| {
-                        paste.update(cx, |view, cx| view.deliver_id(id, cx));
-                    }))
-                    .item(
-                        PopupMenuItem::new(if pinned { "取消收藏" } else { "收藏" }).on_click(
-                            move |_, _, cx| {
-                                pin.update(cx, |view, cx| {
-                                    if view.service.toggle_pin(id).is_ok() {
-                                        view.reload(cx);
-                                    }
-                                });
-                            },
-                        ),
-                    )
-                    .item(PopupMenuItem::separator())
-                    .item(PopupMenuItem::new("删除").on_click(move |_, _, cx| {
-                        del.update(cx, |view, cx| {
-                            if view.service.delete(id).is_ok() {
-                                view.reload(cx);
-                            }
-                        });
-                    }))
+                menu.item(PopupMenuItem::new("复制").on_click(move |_, _, cx| {
+                    copy.update(cx, |view, _| _ = view.service.copy_to_clipboard(id));
+                }))
+                .item(PopupMenuItem::new("执行粘贴").on_click(move |_, _, cx| {
+                    paste.update(cx, |view, cx| view.deliver_id(id, cx));
+                }))
+                .item(
+                    PopupMenuItem::new(if pinned { "取消收藏" } else { "收藏" }).on_click(
+                        move |_, _, cx| {
+                            pin.update(cx, |view, cx| {
+                                if view.service.toggle_pin(id).is_ok() {
+                                    view.reload(cx);
+                                }
+                            });
+                        },
+                    ),
+                )
+                .item(PopupMenuItem::separator())
+                .item(PopupMenuItem::new("删除").on_click(move |_, _, cx| {
+                    del.update(cx, |view, cx| {
+                        if view.service.delete(id).is_ok() {
+                            view.reload(cx);
+                        }
+                    });
+                }))
             })
     }
 
@@ -570,9 +575,7 @@ impl ClipboardView {
                             .danger()
                             .xsmall()
                             .label("批量删除")
-                            .on_click(
-                                cx.listener(|this, _, _, cx| this.delete_selected_batch(cx)),
-                            ),
+                            .on_click(cx.listener(|this, _, _, cx| this.delete_selected_batch(cx))),
                     )
                     .child(
                         Button::new("batch-cancel")
@@ -616,12 +619,7 @@ impl ClipboardView {
                             .hover(|style| style.bg(cx.theme().accent.opacity(0.35)))
                     })
                     .child(filter.label())
-                    .child(
-                        div()
-                            .text_xs()
-                            .opacity(0.6)
-                            .child(shortcut),
-                    )
+                    .child(div().text_xs().opacity(0.6).child(shortcut))
                     .on_click(cx.listener(move |this, _, _, cx| this.set_filter(*filter, cx)))
             }))
     }
@@ -836,7 +834,12 @@ fn files_tooltip_body(names: &[String], cx: &App) -> Div {
                 .overflow_hidden()
                 .text_sm()
                 .line_height(relative(1.5))
-                .children(names.iter().take(MAX_LINES).map(|name| div().child(name.clone()))),
+                .children(
+                    names
+                        .iter()
+                        .take(MAX_LINES)
+                        .map(|name| div().child(name.clone())),
+                ),
         )
         .child(
             div()
@@ -876,7 +879,11 @@ fn clip_tooltip_body(preview: String, char_count: i64, cx: &App) -> Div {
                 .text_sm()
                 .line_height(relative(1.5))
                 .children(preview.lines().map(|line| {
-                    div().child(if line.is_empty() { " ".to_string() } else { line.to_string() })
+                    div().child(if line.is_empty() {
+                        " ".to_string()
+                    } else {
+                        line.to_string()
+                    })
                 })),
         )
         .child(

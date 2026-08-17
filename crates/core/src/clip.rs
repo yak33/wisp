@@ -81,9 +81,9 @@ pub(crate) fn fingerprint(bytes: &[u8]) -> i64 {
     const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
 
-    let hash = bytes
-        .iter()
-        .fold(OFFSET, |hash, &byte| (hash ^ byte as u64).wrapping_mul(PRIME));
+    let hash = bytes.iter().fold(OFFSET, |hash, &byte| {
+        (hash ^ byte as u64).wrapping_mul(PRIME)
+    });
     hash as i64
 }
 

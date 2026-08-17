@@ -20,6 +20,7 @@ const LIGHT_CARD_HOVER_BACKGROUND: u32 = 0xF3F3F3;
 pub(crate) enum OpenFeature {
     Clipboard,
     Memo,
+    Ip,
 }
 
 /// 一张功能卡片的静态描述。`target` 为 None 表示规划中：置灰、不可进入。
@@ -56,12 +57,12 @@ const FEATURES: &[Feature] = &[
     // 图像 / 文件不是独立功能，是剪贴板历史的内部分类（见 ClipFilter），不在此占位
     Feature {
         name: "IP 工具",
-        desc: "网络工具 · 三段 IP 与延迟面板",
-        aliases: &["ip", "wl"],
-        shortcut: "规划中",
+        desc: "网络工具 · 内网与出口 IP 即时检测",
+        aliases: &["ip", "network", "网络", "公网", "代理", "wl"],
+        shortcut: "Ctrl+3",
         icon: IconName::Globe,
         tint: 0x1d9e75,
-        target: None,
+        target: Some(OpenFeature::Ip),
     },
 ];
 
@@ -76,7 +77,8 @@ impl EventEmitter<OpenFeature> for HomeView {}
 
 impl HomeView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let search_state = cx.new(|cx| InputState::new(window, cx).placeholder("搜索功能，回车进入…"));
+        let search_state =
+            cx.new(|cx| InputState::new(window, cx).placeholder("搜索功能，回车进入…"));
 
         let _subscriptions = vec![cx.subscribe_in(
             &search_state,
@@ -150,7 +152,12 @@ impl HomeView {
     // ==================== 渲染 ====================
 
     // 返回具体类型 Stateful<Div>：RPIT 会捕获 &self/cx 生命周期，导致卡片无法逃出 map 闭包
-    fn render_card(&self, ix: usize, feature: &'static Feature, cx: &Context<Self>) -> Stateful<Div> {
+    fn render_card(
+        &self,
+        ix: usize,
+        feature: &'static Feature,
+        cx: &Context<Self>,
+    ) -> Stateful<Div> {
         let enabled = feature.target.is_some();
         let selected = ix == self.selected;
         let is_dark = cx.theme().mode.is_dark();

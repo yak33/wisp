@@ -279,11 +279,14 @@ fn insert_files(store: &ClipStore, paths: &[std::path::PathBuf]) -> bool {
         .collect::<Vec<_>>()
         .join("\n");
     let preview = match paths {
-        [only] => only.file_name().map_or_else(|| content.clone(), |n| n.to_string_lossy().into_owned()),
+        [only] => only
+            .file_name()
+            .map_or_else(|| content.clone(), |n| n.to_string_lossy().into_owned()),
         _ => {
-            let first = paths[0]
-                .file_name()
-                .map_or_else(|| paths[0].to_string_lossy().into_owned(), |n| n.to_string_lossy().into_owned());
+            let first = paths[0].file_name().map_or_else(
+                || paths[0].to_string_lossy().into_owned(),
+                |n| n.to_string_lossy().into_owned(),
+            );
             format!("{first} 等 {} 个文件", paths.len())
         }
     };
@@ -299,8 +302,8 @@ fn persist_image(
     dir: &Path,
     image: &arboard::ImageData<'_>,
 ) -> Option<(i64, String, String, Vec<u8>)> {
-    use image::imageops::FilterType;
     use image::ImageFormat;
+    use image::imageops::FilterType;
 
     let (width, height) = (image.width as u32, image.height as u32);
     let bytes = image.bytes.as_ref();

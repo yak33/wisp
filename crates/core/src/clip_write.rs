@@ -10,7 +10,6 @@
 
 use anyhow::{Context as _, Result};
 use windows::{
-    core::{BOOL, PCWSTR},
     Win32::{
         Foundation::{GetLastError, HANDLE, WIN32_ERROR},
         Graphics::Gdi::{BI_BITFIELDS, BITMAPV5HEADER},
@@ -19,11 +18,12 @@ use windows::{
                 CloseClipboard, EmptyClipboard, OpenClipboard, RegisterClipboardFormatW,
                 SetClipboardData,
             },
-            Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GHND},
+            Memory::{GHND, GlobalAlloc, GlobalLock, GlobalUnlock},
             Ole::{CF_DIBV5, CF_HDROP},
         },
         UI::Shell::DROPFILES,
     },
+    core::{BOOL, PCWSTR},
 };
 
 /// 注册的 "PNG" 剪贴板格式 ID（进程内不变，注册一次缓存）
@@ -142,7 +142,12 @@ fn set_format(format: u32, bytes: &[u8]) -> std::result::Result<(), WIN32_ERROR>
     }
 }
 
-fn try_write(png: &[u8], width: u32, height: u32, bgra: &[u8]) -> std::result::Result<(), WIN32_ERROR> {
+fn try_write(
+    png: &[u8],
+    width: u32,
+    height: u32,
+    bgra: &[u8],
+) -> std::result::Result<(), WIN32_ERROR> {
     unsafe {
         if OpenClipboard(None).is_err() {
             return Err(GetLastError());
@@ -178,8 +183,10 @@ fn try_write(png: &[u8], width: u32, height: u32, bgra: &[u8]) -> std::result::R
                 bV5CSType: 0x7352_4742, // 'sRGB'
                 ..Default::default()
             };
-            let header_bytes =
-                std::slice::from_raw_parts((&header as *const BITMAPV5HEADER).cast::<u8>(), std::mem::size_of::<BITMAPV5HEADER>());
+            let header_bytes = std::slice::from_raw_parts(
+                (&header as *const BITMAPV5HEADER).cast::<u8>(),
+                std::mem::size_of::<BITMAPV5HEADER>(),
+            );
             dib.extend_from_slice(header_bytes);
             dib.extend_from_slice(bgra);
             set_format(CF_DIBV5.0 as u32, &dib)

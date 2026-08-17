@@ -26,21 +26,21 @@ impl WispAssets {
 impl AssetSource for WispAssets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
         match path {
-            "icons/pin.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
-                "../assets/icons/pin.svg"
-            ) as &[u8]))),
+            "icons/pin.svg" => Ok(Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/pin.svg") as &[u8],
+            ))),
             "icons/pin-off.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
                 "../assets/icons/pin-off.svg"
             ) as &[u8]))),
-            "icons/logo.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
-                "../assets/icons/logo.svg"
-            ) as &[u8]))),
+            "icons/logo.svg" => Ok(Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/logo.svg") as &[u8],
+            ))),
             "icons/theme-system.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
                 "../assets/icons/theme-system.svg"
             ) as &[u8]))),
-            "icons/trash.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
-                "../assets/icons/trash.svg"
-            ) as &[u8]))),
+            "icons/trash.svg" => Ok(Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/trash.svg") as &[u8],
+            ))),
             _ => self.base.load(path),
         }
     }
