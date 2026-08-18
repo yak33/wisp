@@ -8,6 +8,8 @@ authors.workspace = true
 anyhow.workspace = true
 crossbeam-channel.workspace = true
 image.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 windows.workspace = true
 rusqlite = { version = "0.32", features = ["bundled"] }
 arboard = "3"

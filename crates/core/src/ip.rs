@@ -1,4 +1,4 @@
-//! IP 查询服务：主内网地址、直连公网出口与系统代理出口。
+//! IP 查询服务：三段出口、归属地与常用站点 HTTPS 响应耗时。
 //!
 //! 公网查询使用 Windows 自带 WinHTTP。直连与代理会话显式采用不同访问类型，
 //! 避免“请求两次同一客户端”导致代理开启后两项仍无法区分。调用是同步的，
@@ -8,9 +8,11 @@ use std::{
     ffi::c_void,
     net::{IpAddr, Ipv4Addr, UdpSocket},
     ptr,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context as _, Result, anyhow, bail};
+use serde::Deserialize;
 use windows::{
     Win32::Networking::WinHttp::{
         INTERNET_DEFAULT_HTTPS_PORT, WINHTTP_ACCESS_TYPE, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
@@ -23,7 +25,9 @@ use windows::{
 };
 
 const REQUEST_TIMEOUT_MS: i32 = 4_000;
-const MAX_RESPONSE_BYTES: usize = 512;
+const LATENCY_TIMEOUT_MS: i32 = 3_500;
+const MAX_IP_RESPONSE_BYTES: usize = 512;
+const MAX_GEO_RESPONSE_BYTES: usize = 4 * 1024;
 
 const DIRECT_IP_ENDPOINTS: &[IpEndpoint] = &[
     IpEndpoint::plain("IPW", "4.ipw.cn", "/"),
@@ -92,6 +96,136 @@ impl IpLookup {
     }
 }
 
+/// 公网地址的简要归属信息。字段可能因上游数据库缺失而为空。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IpLocation {
+    pub country: Option<String>,
+    pub region: Option<String>,
+    pub city: Option<String>,
+    pub network: Option<String>,
+}
+
+impl IpLocation {
+    fn from_parts(
+        country: Option<String>,
+        region: Option<String>,
+        city: Option<String>,
+        network: Option<String>,
+    ) -> Result<Self> {
+        let location = Self {
+            country: normalized(country),
+            region: normalized(region),
+            city: normalized(city),
+            network: normalized(network),
+        };
+        if [
+            &location.country,
+            &location.region,
+            &location.city,
+            &location.network,
+        ]
+        .into_iter()
+        .all(Option::is_none)
+        {
+            bail!("归属地服务未返回有效字段");
+        }
+        Ok(location)
+    }
+}
+
+/// 归属地查询独立于 IP 查询，失败时仍保留已经得到的地址。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IpLocationLookup {
+    Available(IpLocation),
+    Unavailable(String),
+}
+
+impl IpLocationLookup {
+    fn from_result(result: Result<IpLocation>) -> Self {
+        match result {
+            Ok(location) => Self::Available(location),
+            Err(error) => Self::Unavailable(format!("{error:#}")),
+        }
+    }
+}
+
+/// IP 工具中的固定网络探测目标。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkSite {
+    Baidu,
+    NetEase,
+    Aliyun,
+    TencentCloud,
+    GitHub,
+    Google,
+    YouTube,
+    Amazon,
+}
+
+impl NetworkSite {
+    pub const ALL: [Self; 8] = [
+        Self::Baidu,
+        Self::NetEase,
+        Self::Aliyun,
+        Self::TencentCloud,
+        Self::GitHub,
+        Self::Google,
+        Self::YouTube,
+        Self::Amazon,
+    ];
+
+    /// 站点的稳定展示名称。
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Baidu => "百度",
+            Self::NetEase => "网易",
+            Self::Aliyun => "阿里云",
+            Self::TencentCloud => "腾讯云",
+            Self::GitHub => "GitHub",
+            Self::Google => "Google",
+            Self::YouTube => "YouTube",
+            Self::Amazon => "Amazon",
+        }
+    }
+
+    /// 站点所属网络区域，仅用于帮助用户快速比较境内外链路。
+    pub const fn scope(self) -> &'static str {
+        match self {
+            Self::Baidu | Self::NetEase | Self::Aliyun | Self::TencentCloud => "境内",
+            Self::GitHub | Self::Google | Self::YouTube | Self::Amazon => "境外",
+        }
+    }
+
+    fn endpoint(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Baidu => ("www.baidu.com", "/"),
+            Self::NetEase => ("www.163.com", "/"),
+            Self::Aliyun => ("www.aliyun.com", "/"),
+            Self::TencentCloud => ("cloud.tencent.com", "/"),
+            Self::GitHub => ("github.com", "/"),
+            Self::Google => ("www.google.com", "/"),
+            Self::YouTube => ("www.youtube.com", "/"),
+            Self::Amazon => ("www.amazon.com", "/"),
+        }
+    }
+}
+
+/// 单站 HTTPS 可达性与响应耗时。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SiteLatencyLookup {
+    Reachable(Duration),
+    Unreachable(String),
+}
+
+impl SiteLatencyLookup {
+    fn from_result(result: Result<Duration>) -> Self {
+        match result {
+            Ok(latency) => Self::Reachable(latency),
+            Err(error) => Self::Unreachable(format!("{error:#}")),
+        }
+    }
+}
+
 /// 内置 IP 查询入口。当前只有一套确定实现，不制造可替换接口。
 pub struct IpService;
 
@@ -104,6 +238,16 @@ impl IpService {
             IpKind::Proxy => public_ip(WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, PROXY_IP_ENDPOINTS),
         };
         IpLookup::from_result(result)
+    }
+
+    /// 查询指定公网地址的国家、地区、城市与网络提供方。
+    pub fn locate(address: IpAddr) -> IpLocationLookup {
+        IpLocationLookup::from_result(locate_public_ip(address))
+    }
+
+    /// 测量一次 HTTPS 请求从解析、建连、代理、TLS 到收到响应头的耗时。
+    pub fn measure(site: NetworkSite) -> SiteLatencyLookup {
+        SiteLatencyLookup::from_result(measure_site_latency(site))
     }
 }
 
@@ -143,8 +287,82 @@ fn first_available_ip(
 }
 
 fn request_public_ip(access_type: WINHTTP_ACCESS_TYPE, endpoint: &IpEndpoint) -> Result<IpAddr> {
-    let host = null_terminated_utf16(endpoint.host);
-    let path = null_terminated_utf16(endpoint.path);
+    with_https_response(
+        access_type,
+        endpoint.host,
+        endpoint.path,
+        REQUEST_TIMEOUT_MS,
+        |request| {
+            ensure_success_status(request)?;
+            parse_ip_response(
+                &read_bounded_response(request, MAX_IP_RESPONSE_BYTES)?,
+                endpoint.response_format,
+            )
+        },
+    )
+}
+
+fn locate_public_ip(address: IpAddr) -> Result<IpLocation> {
+    match request_ipwhois_location(address) {
+        Ok(location) => Ok(location),
+        Err(primary_error) => request_ip_sb_location(address).map_err(|fallback_error| {
+            anyhow!("归属地服务均不可用（ipwho.is: {primary_error:#}；IP.SB: {fallback_error:#}）")
+        }),
+    }
+}
+
+fn request_ipwhois_location(address: IpAddr) -> Result<IpLocation> {
+    let path = format!(
+        "/{address}?lang=zh-CN&fields=success,message,country,region,city,connection.isp,connection.org"
+    );
+    with_https_response(
+        WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+        "ipwho.is",
+        &path,
+        REQUEST_TIMEOUT_MS,
+        |request| {
+            ensure_success_status(request)?;
+            parse_ipwhois_location(&read_bounded_response(request, MAX_GEO_RESPONSE_BYTES)?)
+        },
+    )
+}
+
+fn request_ip_sb_location(address: IpAddr) -> Result<IpLocation> {
+    let path = format!("/geoip/{address}");
+    with_https_response(
+        WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+        "api.ip.sb",
+        &path,
+        REQUEST_TIMEOUT_MS,
+        |request| {
+            ensure_success_status(request)?;
+            parse_ip_sb_location(&read_bounded_response(request, MAX_GEO_RESPONSE_BYTES)?)
+        },
+    )
+}
+
+fn measure_site_latency(site: NetworkSite) -> Result<Duration> {
+    let (host, path) = site.endpoint();
+    let started = Instant::now();
+    with_https_response(
+        WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+        host,
+        path,
+        LATENCY_TIMEOUT_MS,
+        |_| Ok(started.elapsed()),
+    )
+    .with_context(|| format!("{}连接失败", site.name()))
+}
+
+fn with_https_response<T>(
+    access_type: WINHTTP_ACCESS_TYPE,
+    host: &str,
+    path: &str,
+    timeout_ms: i32,
+    consume: impl FnOnce(*mut c_void) -> Result<T>,
+) -> Result<T> {
+    let host = null_terminated_utf16(host);
+    let path = null_terminated_utf16(path);
 
     // SAFETY: 每个非空句柄立即进入 InternetHandle，所有退出路径均由 Drop 关闭；
     // WinHTTP 使用同步模式，UTF-16 缓冲区在调用完成前始终有效。
@@ -161,10 +379,10 @@ fn request_public_ip(access_type: WINHTTP_ACCESS_TYPE, endpoint: &IpEndpoint) ->
         )?;
         WinHttpSetTimeouts(
             session.raw(),
-            REQUEST_TIMEOUT_MS,
-            REQUEST_TIMEOUT_MS,
-            REQUEST_TIMEOUT_MS,
-            REQUEST_TIMEOUT_MS,
+            timeout_ms,
+            timeout_ms,
+            timeout_ms,
+            timeout_ms,
         )
         .context("设置网络超时失败")?;
 
@@ -187,17 +405,12 @@ fn request_public_ip(access_type: WINHTTP_ACCESS_TYPE, endpoint: &IpEndpoint) ->
                 ptr::null(),
                 WINHTTP_FLAG_SECURE,
             ),
-            "创建 IP 请求失败",
+            "创建网络请求失败",
         )?;
 
-        WinHttpSendRequest(request.raw(), None, None, 0, 0, 0).context("发送 IP 请求失败")?;
-        WinHttpReceiveResponse(request.raw(), ptr::null_mut()).context("接收 IP 响应失败")?;
-
-        ensure_success_status(request.raw())?;
-        parse_ip_response(
-            &read_small_response(request.raw())?,
-            endpoint.response_format,
-        )
+        WinHttpSendRequest(request.raw(), None, None, 0, 0, 0).context("发送网络请求失败")?;
+        WinHttpReceiveResponse(request.raw(), ptr::null_mut()).context("接收网络响应失败")?;
+        consume(request.raw())
     }
 }
 
@@ -205,7 +418,7 @@ fn null_terminated_utf16(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(Some(0)).collect()
 }
 
-unsafe fn ensure_success_status(request: *mut c_void) -> Result<()> {
+fn ensure_success_status(request: *mut c_void) -> Result<()> {
     let mut status = 0_u32;
     let mut size = size_of::<u32>() as u32;
     let mut index = 0_u32;
@@ -227,7 +440,7 @@ unsafe fn ensure_success_status(request: *mut c_void) -> Result<()> {
     Ok(())
 }
 
-unsafe fn read_small_response(request: *mut c_void) -> Result<Vec<u8>> {
+fn read_bounded_response(request: *mut c_void, max_bytes: usize) -> Result<Vec<u8>> {
     let mut response = Vec::with_capacity(64);
     loop {
         let mut buffer = [0_u8; 64];
@@ -245,8 +458,8 @@ unsafe fn read_small_response(request: *mut c_void) -> Result<Vec<u8>> {
             break;
         }
         response.extend_from_slice(&buffer[..read as usize]);
-        if response.len() > MAX_RESPONSE_BYTES {
-            bail!("IP 服务响应异常");
+        if response.len() > max_bytes {
+            bail!("网络服务响应超过 {max_bytes} 字节");
         }
     }
     Ok(response)
@@ -267,6 +480,71 @@ fn parse_ip_response(response: &[u8], format: IpResponseFormat) -> Result<IpAddr
     address
         .parse()
         .map_err(|_| anyhow!("IP 服务返回了无效地址"))
+}
+
+#[derive(Debug, Deserialize)]
+struct IpWhoisResponse {
+    success: bool,
+    message: Option<String>,
+    country: Option<String>,
+    region: Option<String>,
+    city: Option<String>,
+    connection: Option<IpWhoisConnection>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IpWhoisConnection {
+    isp: Option<String>,
+    org: Option<String>,
+}
+
+fn parse_ipwhois_location(response: &[u8]) -> Result<IpLocation> {
+    let response: IpWhoisResponse =
+        serde_json::from_slice(response).context("ipwho.is 返回了无效 JSON")?;
+    if !response.success {
+        bail!(
+            "ipwho.is 查询失败: {}",
+            response.message.as_deref().unwrap_or("未知错误")
+        );
+    }
+    let network = response
+        .connection
+        .and_then(|connection| first_meaningful([connection.isp, connection.org]));
+    IpLocation::from_parts(response.country, response.region, response.city, network)
+}
+
+#[derive(Debug, Deserialize)]
+struct IpSbResponse {
+    country: Option<String>,
+    region: Option<String>,
+    city: Option<String>,
+    isp: Option<String>,
+    organization: Option<String>,
+    asn_organization: Option<String>,
+    message: Option<String>,
+}
+
+fn parse_ip_sb_location(response: &[u8]) -> Result<IpLocation> {
+    let response: IpSbResponse =
+        serde_json::from_slice(response).context("IP.SB 返回了无效 JSON")?;
+    let message = response.message.unwrap_or_else(|| "未返回归属地".into());
+    let network = first_meaningful([
+        response.isp,
+        response.organization,
+        response.asn_organization,
+    ]);
+    IpLocation::from_parts(response.country, response.region, response.city, network)
+        .with_context(|| format!("IP.SB 查询失败: {message}"))
+}
+
+fn normalized(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+fn first_meaningful<const N: usize>(values: [Option<String>; N]) -> Option<String> {
+    values.into_iter().find_map(normalized)
 }
 
 struct InternetHandle(*mut c_void);
@@ -332,6 +610,81 @@ mod tests {
         assert!(parse_ip_response(br#"{"ip":"203.0.113.7"}"#, IpResponseFormat::Plain).is_err());
         assert!(parse_ip_response(b"not-an-ip", IpResponseFormat::Plain).is_err());
         assert!(parse_ip_response(b"203.0.113.7", IpResponseFormat::IpipText).is_err());
+    }
+
+    #[test]
+    fn ipwhois_location_keeps_only_meaningful_fields() {
+        let response = r#"{
+            "success": true,
+            "message": null,
+            "country": "中国",
+            "region": "山东省",
+            "city": "济南市",
+            "connection": { "isp": "  ", "org": "中国移动" }
+        }"#
+        .as_bytes();
+
+        assert_eq!(
+            parse_ipwhois_location(response).unwrap(),
+            IpLocation {
+                country: Some("中国".into()),
+                region: Some("山东省".into()),
+                city: Some("济南市".into()),
+                network: Some("中国移动".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn ipwhois_application_error_is_not_treated_as_a_location() {
+        let response = br#"{
+            "success": false,
+            "message": "Reserved range",
+            "country": null,
+            "region": null,
+            "city": null,
+            "connection": null
+        }"#;
+
+        assert!(
+            parse_ipwhois_location(response)
+                .unwrap_err()
+                .to_string()
+                .contains("Reserved range")
+        );
+    }
+
+    #[test]
+    fn ip_sb_location_falls_back_to_the_asn_organization() {
+        let response = br#"{
+            "country": "Japan",
+            "region": "Tokyo",
+            "city": "Tokyo",
+            "isp": null,
+            "organization": null,
+            "asn_organization": "Amazon.com, Inc.",
+            "message": null
+        }"#;
+
+        assert_eq!(
+            parse_ip_sb_location(response).unwrap().network.as_deref(),
+            Some("Amazon.com, Inc.")
+        );
+    }
+
+    #[test]
+    fn network_site_catalog_is_balanced_and_unique() {
+        let domestic = NetworkSite::ALL
+            .iter()
+            .filter(|site| site.scope() == "境内")
+            .count();
+        let hosts: std::collections::HashSet<_> = NetworkSite::ALL
+            .iter()
+            .map(|site| site.endpoint().0)
+            .collect();
+
+        assert_eq!(domestic, 4);
+        assert_eq!(hosts.len(), NetworkSite::ALL.len());
     }
 
     #[test]

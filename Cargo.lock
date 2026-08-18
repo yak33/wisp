@@ -8729,6 +8729,8 @@ dependencies = [
  "crossbeam-channel",
  "image",
  "rusqlite",
+ "serde",
+ "serde_json",
  "windows 0.61.3",
 ]
 
