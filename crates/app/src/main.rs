@@ -1,3 +1,5 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 //! Wisp 入口：窗口生命周期、托盘、全局快捷键与事件处理。
 //!
 //! 交互约定：全局快捷键显隐（Alt+Space 被占用时自动降级）；
@@ -6,6 +8,7 @@
 mod assets;
 mod clipboard_view;
 mod config;
+mod data_dir;
 mod home_view;
 mod hotkey;
 mod ip_view;
@@ -15,7 +18,7 @@ mod theme;
 mod ui;
 mod wisp_view;
 
-use std::{path::PathBuf, sync::Arc};
+use std::sync::Arc;
 
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
 use gpui::*;
@@ -36,8 +39,9 @@ use windows::{
             Threading::CreateMutexW,
         },
         UI::WindowsAndMessaging::{
-            IsWindowVisible, MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND, MessageBoxW, SW_HIDE,
-            SW_SHOW, SetForegroundWindow, ShowWindow,
+            IDYES, IsWindowVisible, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK,
+            MB_SETFOREGROUND, MB_YESNO, MessageBoxW, SW_HIDE, SW_SHOW, SetForegroundWindow,
+            ShowWindow,
         },
     },
     core::{HSTRING, w},
@@ -48,6 +52,7 @@ use crate::assets::WispAssets;
 
 use crate::{
     config::Config,
+    data_dir::DataDirectory,
     wisp_view::{Page, WispView},
 };
 
@@ -288,9 +293,13 @@ fn build_tray_menu() -> Menu {
 /// 原生关于信息框。托盘菜单不依赖主窗口可见状态，隐藏时也能直接查看版本信息。
 fn show_about(cx: &App) {
     let owner = cx.try_global::<NativeWindow>().map(|native| hwnd(native.0));
+    let distribution = cx
+        .try_global::<DataDirectory>()
+        .map_or("安装版", |data| data.mode().name());
     let content = HSTRING::from(format!(
-        "Wisp v{}\n\n轻若无物的 Windows 效率工具\n剪贴板历史 · 备忘快贴 · IP 工具\n\n© ZHANGCHAO",
-        env!("CARGO_PKG_VERSION")
+        "Wisp v{} · {}\n\n轻若无物的 Windows 效率工具\n剪贴板历史 · 备忘快贴 · IP 工具\n\n© ZHANGCHAO",
+        env!("CARGO_PKG_VERSION"),
+        distribution
     ));
     unsafe {
         _ = MessageBoxW(
@@ -380,12 +389,30 @@ pub(crate) fn rebind_wake_hotkey(label: &str, cx: &mut App) -> Result<(), &'stat
 
 // ==================== 入口 ====================
 
-fn db_path() -> PathBuf {
-    std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("Wisp")
-        .join("wisp.db")
+fn confirm_installed_data_import() -> bool {
+    let content = HSTRING::from(
+        "检测到安装版 Wisp 的历史数据。\n\n是否将剪贴板历史、备忘、设置和图像复制到便携版？\n原数据会保留，不会被移动或删除。",
+    );
+    unsafe {
+        MessageBoxW(
+            None,
+            &content,
+            w!("导入 Wisp 数据"),
+            MB_YESNO | MB_ICONQUESTION | MB_SETFOREGROUND,
+        ) == IDYES
+    }
+}
+
+fn show_startup_error(error: &anyhow::Error) {
+    let content = HSTRING::from(format!("Wisp 启动失败\n\n{error:#}"));
+    unsafe {
+        _ = MessageBoxW(
+            None,
+            &content,
+            w!("Wisp"),
+            MB_OK | MB_ICONERROR | MB_SETFOREGROUND,
+        );
+    }
 }
 
 fn main() {
@@ -393,6 +420,20 @@ fn main() {
     let Some(_single_instance) = SingleInstance::acquire() else {
         return;
     };
+
+    let data_directory = match DataDirectory::resolve() {
+        Ok(data) => data,
+        Err(error) => {
+            show_startup_error(&error);
+            return;
+        }
+    };
+    let import_installed_data =
+        data_directory.should_offer_installed_data_import() && confirm_installed_data_import();
+    if let Err(error) = data_directory.prepare(import_installed_data) {
+        show_startup_error(&error);
+        return;
+    }
 
     let app = gpui_platform::application().with_assets(WispAssets::new());
 
@@ -402,7 +443,7 @@ fn main() {
 
         // 剪贴板服务：监听/入库在 core 的独立线程，变更信号进壳层事件泵
         let (changed_tx, changed_rx) = crossbeam_channel::unbounded::<()>();
-        let db_path = db_path();
+        let db_path = data_directory.database_path();
         let clipboard_service =
             Arc::new(ClipboardService::start(&db_path, changed_tx).expect("启动剪贴板服务失败"));
         let memo_service = Arc::new(MemoService::open(&db_path).expect("打开备忘库失败"));
@@ -435,6 +476,7 @@ fn main() {
         }
 
         cx.set_global(SystemIntegrations { tray, hotkeys });
+        cx.set_global(data_directory);
         // 配置转为全局单实例：标题栏 / 设置页 / 根视图共享同一份，避免副本互相覆盖
         cx.set_global(config);
 

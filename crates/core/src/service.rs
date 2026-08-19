@@ -64,6 +64,9 @@ impl ClipboardService {
             .parent()
             .map(|dir| dir.join("images"))
             .unwrap_or_else(|| Path::new("images").to_path_buf());
+        // 便携版导入后数据库中的旧绝对路径仍指向 LOCALAPPDATA；只要同名受管
+        // 图像已存在于当前 data/images，就把路径收敛到当前发行位置。
+        store.relocate_image_paths(&images_dir)?;
         // 孤儿图像随启动一并扫除：prune 与手动删除只删行，落盘文件在此回收
         sweep_orphan_images(&store, &images_dir);
 

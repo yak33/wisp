@@ -68,6 +68,33 @@ Wisp（轻烟）是一个常驻托盘、快捷键瞬时唤起的桌面效率工�
 
 完整进度见 [docs/PROGRESS.md](docs/PROGRESS.md)。
 
+## 下载与安装
+
+Wisp 同时提供便携版与安装版，两者使用同一份原生程序，不存在功能差异。
+
+### 便携版
+
+下载 `Wisp-v<版本>-portable-win-x64.zip` 并解压，直接运行 `Wisp\wisp.exe`。
+
+- 无需安装与管理员权限
+- 数据保存在程序同目录的 `data\`，迁移时退出 Wisp 后整体移动文件夹
+- 首次运行若检测到安装版数据，可选择复制剪贴板历史、备忘、设置与图像
+- 升级时只替换 `wisp.exe`，保留 `portable.flag` 与 `data\`
+- 移动目录后，已注册的开机自启路径可能失效，需要在设置中重新开启
+
+### 安装版
+
+运行 `Wisp-v<版本>-setup-win-x64.exe`，默认安装到当前用户目录，不需要管理员权限。
+
+- 程序目录：`%LOCALAPPDATA%\Programs\Wisp`
+- 用户数据：`%LOCALAPPDATA%\Wisp`
+- 覆盖安装新版不会影响历史数据与设置
+- 卸载会移除程序、快捷方式和开机自启项，但保留用户数据，方便重装恢复
+
+当前安装包尚未进行商业代码签名，首次下载运行时 Windows 可能显示 SmartScreen
+信誉提示。请从项目 GitHub Releases 获取产物，并用同版本的 `SHA256SUMS.txt`
+核对文件完整性。
+
 ## 交互
 
 | 按键 / 操作（默认） | 行为 |
@@ -103,7 +130,7 @@ wisp
 │   ├── watcher   Win32 message-only 窗口，事件驱动监听剪贴板
 │   ├── store     剪贴板存储：指纹去重、置顶排序、模糊检索
 │   ├── memo      备忘存储：片段 / 标签多对多，事务化保存
-│   ├── ip        三段 IP：主内网地址 + WinHTTP 直连 / 系统代理出口
+│   ├── ip        三段 IP、归属地与八站点 HTTPS 响应耗时
 │   ├── paste     粘贴链路：焦点还原 + SendInput 模拟 Ctrl+V
 │   └── service   编排：监听线程 → 工作线程 → 壳层信号
 └── crates/app    wisp-app —— GPUI 壳（bin: wisp）
@@ -153,6 +180,19 @@ cargo test -p wisp-core
 ```
 
 > 首次构建会从源码编译 GPUI 全家，耗时约 10 分钟；此后增量编译在秒级。
+
+同时生成便携 ZIP、安装包与 SHA-256 校验文件：
+
+```powershell
+# 额外依赖：Inno Setup 7（兼容 Inno Setup 6）
+.\scripts\release.ps1
+
+# 未安装 Inno Setup 时，仅生成便携版
+.\scripts\release.ps1 -SkipInstaller
+```
+
+产物统一输出到 `dist\`。版本号读取自 workspace `Cargo.toml`，并同步进入 exe
+版本资源、安装器、文件名、关于页面和发布说明，避免多处手工维护。
 
 ## 技术栈
 

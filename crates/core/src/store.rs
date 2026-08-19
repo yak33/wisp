@@ -325,6 +325,46 @@ impl ClipStore {
             .collect())
     }
 
+    /// 把数据库中的受管图像路径重定位到当前数据目录。
+    ///
+    /// 仅当目标目录存在同名 PNG 时更新，文件列表等用户路径永不触碰。
+    pub fn relocate_image_paths(&self, images_dir: &Path) -> Result<usize> {
+        let mut conn = self.conn.lock().expect("clip store poisoned");
+        let updates = {
+            let mut stmt = conn.prepare("SELECT id, content FROM clips WHERE kind = ?1")?;
+            let rows = stmt
+                .query_map(params![ClipKind::Image as i64], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows.into_iter()
+                .filter_map(|(id, content)| {
+                    let current = PathBuf::from(&content);
+                    let file_name = current.file_name()?;
+                    let target = images_dir.join(file_name);
+                    let is_png = target
+                        .extension()
+                        .and_then(|extension| extension.to_str())
+                        .is_some_and(|extension| extension.eq_ignore_ascii_case("png"));
+                    (is_png && target.is_file() && target != current).then_some((id, target))
+                })
+                .collect::<Vec<_>>()
+        };
+
+        if updates.is_empty() {
+            return Ok(0);
+        }
+        let tx = conn.transaction()?;
+        for (id, target) in &updates {
+            tx.execute(
+                "UPDATE clips SET content = ?1 WHERE id = ?2",
+                params![target.to_string_lossy(), id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(updates.len())
+    }
+
     /// 例行清理：过期未置顶条目先走，再把未置顶总量压回上限。
     /// 启动与每次入库后各跑一次；失败静默——清理只是护栏不是关键路径。
     pub(crate) fn prune(&self) {
@@ -622,6 +662,39 @@ mod tests {
             store.image_file_names().unwrap(),
             vec!["00ff.png".to_string()]
         );
+    }
+
+    #[test]
+    fn image_paths_follow_the_current_managed_directory() {
+        let store = memory_store();
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "wisp-relocate-images-{}-{nonce}",
+            std::process::id()
+        ));
+        let images = root.join("images");
+        std::fs::create_dir_all(&images).unwrap();
+        std::fs::write(images.join("00ff.png"), b"png").unwrap();
+        store
+            .insert_image(
+                0xff,
+                r"C:\Users\old\AppData\Local\Wisp\images\00ff.png",
+                "800×600 · 12.3 KB",
+                b"t",
+            )
+            .unwrap();
+
+        assert_eq!(store.relocate_image_paths(&images).unwrap(), 1);
+        let relocated = store.query(ClipFilter::Image, "", 1).unwrap();
+        assert_eq!(
+            relocated[0].content,
+            images.join("00ff.png").to_string_lossy()
+        );
+
+        _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

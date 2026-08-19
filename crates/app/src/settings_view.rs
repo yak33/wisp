@@ -21,8 +21,10 @@ use gpui_component::{
 };
 
 use crate::{
-    WakeHotkey, autostart_enabled, config, hotkey, rebind_wake_hotkey, refresh_tray,
-    resume_wake_hotkey, set_autostart, set_tray_visible, suspend_wake_hotkey,
+    WakeHotkey, autostart_enabled, config,
+    data_dir::{DataDirectory, DistributionMode},
+    hotkey, rebind_wake_hotkey, refresh_tray, resume_wake_hotkey, set_autostart, set_tray_visible,
+    suspend_wake_hotkey,
     theme::ThemePreference,
     ui::{brand, kbd_pill},
 };
@@ -136,7 +138,9 @@ impl SettingsView {
     }
 
     /// 设置行骨架：左侧名称与说明，右侧控件。
-    fn row(name: &'static str, desc: &'static str, cx: &App) -> Div {
+    fn row(name: impl Into<SharedString>, desc: impl Into<SharedString>, cx: &App) -> Div {
+        let name = name.into();
+        let desc = desc.into();
         h_flex()
             .px_3()
             .py_2p5()
@@ -226,6 +230,13 @@ impl SettingsView {
 
     fn render_general_section(&self, cx: &Context<Self>) -> Div {
         let tray_hidden = config::get("hide_tray", cx).as_deref() == Some("1");
+        let autostart_description = cx
+            .try_global::<DataDirectory>()
+            .filter(|data| data.mode() == DistributionMode::Portable)
+            .map_or(
+                "登录 Windows 后自动在后台运行",
+                |_| "登录 Windows 后自动运行；移动便携目录后需重新开启",
+            );
 
         Self::section("常规", cx)
             .child(
@@ -241,7 +252,7 @@ impl SettingsView {
                 ),
             )
             .child(
-                Self::row("开机自启", "登录 Windows 后自动在后台运行", cx).child(
+                Self::row("开机自启", autostart_description, cx).child(
                     Switch::new("autostart")
                         .checked(autostart_enabled())
                         .on_click(cx.listener(|_, enabled: &bool, _, cx| {
@@ -290,13 +301,16 @@ impl SettingsView {
     }
 
     fn render_about_section(&self, cx: &Context<Self>) -> Div {
+        let distribution = cx
+            .try_global::<DataDirectory>()
+            .map_or("安装版", |data| data.mode().name());
+        let version = format!(
+            "v{} · {} · 常驻托盘的效率工具",
+            env!("CARGO_PKG_VERSION"),
+            distribution
+        );
         Self::section("关于", cx).child(
-            Self::row(
-                "Wisp",
-                concat!("v", env!("CARGO_PKG_VERSION"), " · 常驻托盘的效率工具"),
-                cx,
-            )
-            .child(
+            Self::row("Wisp", version, cx).child(
                 h_flex()
                     .gap_2()
                     .child(
