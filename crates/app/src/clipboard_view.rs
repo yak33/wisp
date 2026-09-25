@@ -1,8 +1,8 @@
 //! 剪贴板历史视图：搜索、键盘导航、回车直达粘贴。
 
 use std::{
-    cell::RefCell,
-    collections::{BTreeSet, HashMap},
+    cell::{Cell, RefCell},
+    collections::{BTreeSet, HashMap, HashSet},
     rc::Rc,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -44,6 +44,8 @@ const TOOLTIP_PREVIEW_CHARS: usize = 500;
 const PREVIEW_MAX_EDGE: u32 = 640;
 /// 放大预览缓存上限（条），超出整体清空——防长会话内存膨胀
 const PREVIEW_CACHE_MAX: usize = 12;
+/// 缩略图缓存上限（条），达到上限时整体清空——防长会话浏览累积 GPU 纹理
+const THUMB_CACHE_MAX: usize = 200;
 
 pub(crate) struct ClipboardView {
     service: Arc<ClipboardService>,
@@ -53,6 +55,7 @@ pub(crate) struct ClipboardView {
     items: Vec<Clip>,
     /// 全库未收藏记录数，随列表刷新更新；不受当前搜索和分类影响。
     unpinned_count: usize,
+    clear_error: Option<String>,
     item_sizes: Rc<Vec<Size<Pixels>>>,
     /// 键盘光标行（↑↓/Enter/Ctrl+P 的作用对象）
     selected: usize,
@@ -61,10 +64,21 @@ pub(crate) struct ClipboardView {
     /// 右键菜单正打开的行。该行悬停提示让位，避免两个浮层互相干扰；
     /// 鼠标离开该行或列表刷新时解除。
     context_menu_row: Option<i64>,
-    /// 图像缩略图解码缓存（clip id → GPU 可渲染图像），避免每帧解码
+    /// 列表容器的焦点句柄：唤起时焦点落这里而非搜索框，
+    /// Delete / Enter 等列表键直接可用，搜索框由用户点击后聚焦。
+    focus_handle: FocusHandle,
+    /// 图像缩略图解码缓存（clip id → GPU 可渲染图像），避免每帧解码。
+    /// 有上限防长会话膨胀，见 [`Self::thumb_image`]。
     thumbs: RefCell<HashMap<i64, Arc<RenderImage>>>,
     /// 悬停放大预览缓存（解码原图压到 640px，见 [`Self::preview_image`]）
     previews: RefCell<HashMap<i64, Arc<RenderImage>>>,
+    /// 键盘浮动预览的锚点（窗口坐标，prepaint 阶段捕获）：
+    /// 光标行与列表外壳各自的位置，浮层据此相对外壳定位
+    cursor_row_bounds: Rc<Cell<Bounds<Pixels>>>,
+    list_shell_bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// 最近一次选择移动是否来自键盘：只有键盘导航弹浮动预览，
+    /// 鼠标操作走原有悬停提示
+    keyboard_nav: bool,
     scroll_handle: VirtualListScrollHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -99,12 +113,17 @@ impl ClipboardView {
             filter: ClipFilter::All,
             items: Vec::new(),
             unpinned_count: 0,
+            clear_error: None,
             item_sizes: Rc::new(Vec::new()),
             selected: 0,
             selection: BTreeSet::new(),
             context_menu_row: None,
+            focus_handle: cx.focus_handle(),
             thumbs: RefCell::new(HashMap::new()),
             previews: RefCell::new(HashMap::new()),
+            cursor_row_bounds: Rc::new(Cell::new(Bounds::default())),
+            list_shell_bounds: Rc::new(Cell::new(Bounds::default())),
+            keyboard_nav: false,
             scroll_handle: VirtualListScrollHandle::new(),
             _subscriptions,
         };
@@ -112,21 +131,51 @@ impl ClipboardView {
         view
     }
 
-    pub fn focus_search(&self, window: &mut Window, cx: &mut Context<Self>) {
-        self.input_state
-            .update(cx, |state, cx| state.focus(window, cx));
+    /// 唤起/进入页面时聚焦列表容器（不进搜索框）。
+    pub fn focus_list(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_handle.focus(window, cx);
     }
 
     /// 以当前分类与关键字重查列表。新内容置顶，故刷新后选中项归位到首条；
     /// 结果集变了，多选集合随之作废。
     pub fn reload(&mut self, cx: &mut Context<Self>) {
+        self.reload_with(cx, true);
+    }
+
+    /// 后台变更触发的静默刷新：保留用户当前选择与滚动位置，
+    /// 窗口钉住时后台复制不会把用户操作状态强制归零。
+    pub fn reload_silent(&mut self, cx: &mut Context<Self>) {
+        self.reload_with(cx, false);
+    }
+
+    fn reload_with(&mut self, cx: &mut Context<Self>, reset_selection: bool) {
+        let selected_id = self.items.get(self.selected).map(|clip| clip.id);
         self.items = self.service.query(self.filter, &self.keyword, QUERY_LIMIT);
         self.unpinned_count = self.service.unpinned_count();
         self.item_sizes = Rc::new(vec![size(ROW_WIDTH, ROW_HEIGHT); self.items.len()]);
-        self.selected = 0;
-        self.selection.clear();
-        self.context_menu_row = None;
-        self.scroll_handle.scroll_to_item(0, ScrollStrategy::Top);
+        if reset_selection {
+            self.selected = 0;
+            self.selection.clear();
+            self.context_menu_row = None;
+            self.scroll_handle.scroll_to_item(0, ScrollStrategy::Top);
+        } else {
+            // 新条目会插在前面，按 ID 找回原选中项，避免回车交付另一条。
+            self.selected = selected_id
+                .and_then(|id| self.items.iter().position(|clip| clip.id == id))
+                .unwrap_or(0);
+            let visible_ids: HashSet<i64> = self.items.iter().map(|clip| clip.id).collect();
+            self.selection.retain(|id| visible_ids.contains(id));
+            if self
+                .context_menu_row
+                .is_some_and(|id| !visible_ids.contains(&id))
+            {
+                self.context_menu_row = None;
+            }
+            if !self.items.is_empty() {
+                self.scroll_handle
+                    .scroll_to_item(self.selected, ScrollStrategy::Nearest);
+            }
+        }
         cx.notify();
     }
 
@@ -146,9 +195,8 @@ impl ClipboardView {
             self.deliver_id(clip.id, cx);
         } else {
             hide_main_window(cx);
-            if let Err(err) = self.service.copy_to_clipboard(clip.id) {
-                eprintln!("仅复制失败: {err:#}");
-            }
+            // 仅复制也走工作线程，避免图像解码卡住 UI；失败由服务记录。
+            self.service.paste_to(clip.id, None);
         }
     }
 
@@ -167,6 +215,8 @@ impl ClipboardView {
             return;
         };
         self.selected = ix;
+        // 鼠标操作关掉键盘浮动预览，避免与悬停提示双浮层
+        self.keyboard_nav = false;
         if !self.selection.remove(&clip.id) {
             self.selection.insert(clip.id);
         }
@@ -205,18 +255,44 @@ impl ClipboardView {
                         .show_cancel(true),
                 )
                 .on_ok(move |_, _, cx| {
-                    view.update(cx, |this, cx| match this.service.clear_unpinned() {
-                        Ok(_) => {
-                            this.thumbs.borrow_mut().clear();
-                            this.previews.borrow_mut().clear();
-                            this.reload(cx);
-                            true
-                        }
-                        Err(err) => {
-                            eprintln!("清空剪贴板历史失败: {err:#}");
-                            false
+                    // on_ok 是 Fn（可能多次调用），捕获的 view 每次 clone 一份进任务
+                    let view = view.clone();
+                    let service = view.read(cx).service.clone();
+                    view.update(cx, |this, cx| {
+                        this.clear_error = None;
+                        cx.notify();
+                    });
+                    // 清空含 SQLite 事务与文件删除，放后台线程池避免阻塞 UI；
+                    // 完成后经 cx.update 回 UI 线程刷新（与 main.rs 事件泵同模式）
+                    cx.spawn(async move |cx| {
+                        let result = cx
+                            .background_executor()
+                            .spawn(async move { service.clear_unpinned() })
+                            .await;
+                        match result {
+                            Ok(_) => {
+                                cx.update(|cx| {
+                                    view.update(cx, |this, cx| {
+                                        this.thumbs.borrow_mut().clear();
+                                        this.previews.borrow_mut().clear();
+                                        this.reload(cx);
+                                    });
+                                });
+                            }
+                            Err(err) => {
+                                let message = format!("清空剪贴板历史失败: {err:#}");
+                                eprintln!("{message}");
+                                cx.update(|cx| {
+                                    view.update(cx, |this, cx| {
+                                        this.clear_error = Some(message);
+                                        cx.notify();
+                                    });
+                                });
+                            }
                         }
                     })
+                    .detach();
+                    true
                 })
         });
     }
@@ -227,6 +303,7 @@ impl ClipboardView {
         }
         let last = self.items.len() as i64 - 1;
         self.selected = (self.selected as i64 + delta).clamp(0, last) as usize;
+        self.keyboard_nav = true;
         self.scroll_handle
             .scroll_to_item(self.selected, ScrollStrategy::Nearest);
         cx.notify();
@@ -243,26 +320,43 @@ impl ClipboardView {
         }
     }
 
-    /// 解码缩略图为 GPU 可渲染图像并按条目缓存——每行每帧解码不可接受。
-    fn thumb_image(&self, id: i64, thumb: Option<&[u8]>) -> Option<Arc<RenderImage>> {
-        let bytes = thumb?;
-        if let Some(cached) = self.thumbs.borrow().get(&id) {
-            return Some(cached.clone());
-        }
+    /// 可视区一次查出缺失缩略图，再解码缓存；滚动时不逐行访问数据库。
+    fn load_visible_thumbs(&self, visible_range: std::ops::Range<usize>) {
+        let missing_ids = {
+            let cache = self.thumbs.borrow();
+            visible_range
+                .filter_map(|ix| self.items.get(ix))
+                .filter(|clip| clip.kind == ClipKind::Image && !cache.contains_key(&clip.id))
+                .map(|clip| clip.id)
+                .collect::<Vec<_>>()
+        };
 
-        let decoded = image::load_from_memory(bytes).ok()?.to_rgba8();
-        let (width, height) = (decoded.width(), decoded.height());
-        let mut bgra = decoded.into_raw();
-        for pixel in bgra.chunks_exact_mut(4) {
-            pixel.swap(0, 2); // RenderImage 取 BGRA（同 gpui 的 svg 渲染管线）
+        for (id, bytes) in self.service.thumbs_of(&missing_ids) {
+            let Ok(decoded) = image::load_from_memory(&bytes) else {
+                continue;
+            };
+            let decoded = decoded.to_rgba8();
+            let (width, height) = (decoded.width(), decoded.height());
+            let mut bgra = decoded.into_raw();
+            for pixel in bgra.chunks_exact_mut(4) {
+                pixel.swap(0, 2); // RenderImage 取 BGRA（同 gpui 的 svg 渲染管线）
+            }
+            let buffer =
+                image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_raw(width, height, bgra)
+                    .expect("缩略图数据与尺寸不符");
+            let rendered = Arc::new(RenderImage::new(smallvec::smallvec![image::Frame::new(
+                buffer
+            )]));
+            let mut cache = self.thumbs.borrow_mut();
+            if cache.len() >= THUMB_CACHE_MAX {
+                cache.clear();
+            }
+            cache.insert(id, rendered);
         }
-        let buffer = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_raw(width, height, bgra)
-            .expect("缩略图数据与尺寸不符");
-        let rendered = Arc::new(RenderImage::new(smallvec::smallvec![image::Frame::new(
-            buffer
-        )]));
-        self.thumbs.borrow_mut().insert(id, rendered.clone());
-        Some(rendered)
+    }
+
+    fn thumb_image(&self, id: i64) -> Option<Arc<RenderImage>> {
+        self.thumbs.borrow().get(&id).cloned()
     }
 
     /// 悬停放大预览：解码原图并压到最长边 640——缩略图只有 128px，
@@ -322,6 +416,15 @@ impl ClipboardView {
             .border_b_1()
             .border_color(cx.theme().border.opacity(0.3))
             .when(is_selected, |style| style.bg(selection_background(cx)))
+            // 光标行捕获自身窗口坐标：键盘浮动预览的锚点
+            .when(is_selected, |row| {
+                let cell = self.cursor_row_bounds.clone();
+                row.child(
+                    canvas(move |bounds, _, _| cell.set(bounds), |_, _, _, _| {})
+                        .absolute()
+                        .size_full(),
+                )
+            })
             .when(!is_selected && in_set, |style| {
                 style.bg(selection_background_subtle(cx))
             })
@@ -348,10 +451,9 @@ impl ClipboardView {
                         .border_1()
                         .border_color(cx.theme().border.opacity(0.4))
                         .overflow_hidden()
-                        .when_some(
-                            self.thumb_image(clip.id, clip.thumb.as_deref()),
-                            |cell, image| cell.child(img(image).size_full()),
-                        ),
+                        .when_some(self.thumb_image(clip.id), |cell, image| {
+                            cell.child(img(image).size_full())
+                        }),
                 )
             })
             .when(!is_image, |row| {
@@ -415,17 +517,7 @@ impl ClipboardView {
         // 图像行的 content 是落盘路径，悬停时按需解码原图放大显示
         let image_path = (clip.kind == ClipKind::Image).then(|| clip.content.clone());
         // 文件行的 content 是路径清单，悬停逐行列出文件名
-        let file_names = (clip.kind == ClipKind::Files).then(|| {
-            clip.content
-                .lines()
-                .map(|line| {
-                    std::path::Path::new(line).file_name().map_or_else(
-                        || line.to_string(),
-                        |name| name.to_string_lossy().into_owned(),
-                    )
-                })
-                .collect::<Vec<String>>()
-        });
+        let file_names = (clip.kind == ClipKind::Files).then(|| file_display_names(&clip.content));
         let ghost_text = clip.preview.clone();
         let entity = cx.entity();
 
@@ -504,7 +596,7 @@ impl ClipboardView {
                 let pin = entity.clone();
                 let del = entity.clone();
                 menu.item(PopupMenuItem::new("复制").on_click(move |_, _, cx| {
-                    copy.update(cx, |view, _| _ = view.service.copy_to_clipboard(id));
+                    copy.update(cx, |view, _| view.service.paste_to(id, None));
                 }))
                 .item(PopupMenuItem::new("执行粘贴").on_click(move |_, _, cx| {
                     paste.update(cx, |view, cx| view.deliver_id(id, cx));
@@ -529,6 +621,56 @@ impl ClipboardView {
                     });
                 }))
             })
+    }
+
+    /// 键盘导航时跟随光标的浮动预览：挂在列表外壳之上、光标行上方弹出，
+    /// 内容与悬停预览同源。只有键盘移动光标才显示，鼠标操作仍走悬停提示。
+    fn render_cursor_floating_preview(&self, cx: &Context<Self>) -> Div {
+        let Some(clip) = self.items.get(self.selected) else {
+            return div();
+        };
+        let row = self.cursor_row_bounds.get();
+        let shell = self.list_shell_bounds.get();
+        if shell.size.width <= px(0.) {
+            return div();
+        }
+
+        // 与悬停预览同源的正文：图像放大 / 文件清单 / 文本截断
+        let body = match clip.kind {
+            ClipKind::Image => match self.preview_image(clip.id, &clip.content) {
+                Some(image) => image_tooltip_body(image, clip.preview.clone(), cx),
+                None => return div(),
+            },
+            ClipKind::Files => files_tooltip_body(&file_display_names(&clip.content), cx),
+            ClipKind::Text => {
+                let preview = tooltip_preview(&clip.content, clip.char_count);
+                clip_tooltip_body(preview, clip.char_count, cx)
+            }
+        };
+
+        // 行顶到外壳顶留有空间则向上弹（bottom 锚定、高度自适应），
+        // 否则改到行下方展开
+        let row_top_in_shell = row.origin.y - shell.origin.y;
+        let card = div()
+            .absolute()
+            .left(row.origin.x - shell.origin.x)
+            .w(px(480.))
+            .max_h(px(320.))
+            .overflow_hidden()
+            .bg(cx.theme().popover)
+            .text_color(cx.theme().popover_foreground)
+            .border_1()
+            .border_color(cx.theme().border)
+            .shadow_md()
+            .rounded(px(6.))
+            .px_2()
+            .py_1()
+            .child(body);
+        if row_top_in_shell > px(200.) {
+            card.bottom(shell.size.height - row_top_in_shell + px(4.))
+        } else {
+            card.top(row.bottom_left().y - shell.origin.y + px(4.))
+        }
     }
 
     /// 批量操作栏：两条及以上被选中时出现在列表底部。
@@ -629,6 +771,7 @@ impl Render for ClipboardView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .size_full()
+            .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
                 match ev.keystroke.key.as_str() {
                     // 多选时 Esc 先清多选；无多选则冒泡到根视图（回主页 / 隐藏窗口）
@@ -641,6 +784,21 @@ impl Render for ClipboardView {
                     }
                     "up" => this.move_selection(-1, cx),
                     "down" => this.move_selection(1, cx),
+                    // 多选时 Delete 先清空选择（同 Esc 第一层）；
+                    // 单选 / 纯键盘光标时删除所选条目
+                    "delete" => {
+                        if this.selection.len() >= 2 {
+                            this.selection.clear();
+                            cx.notify();
+                        } else if let Some(clip) = this.items.get(this.selected)
+                            && this.service.delete(clip.id).is_ok()
+                        {
+                            this.reload(cx);
+                        }
+                    }
+                    // 焦点在列表时 Enter 直接交付；焦点在搜索框时走
+                    // InputEvent::PressEnter 路径，两处语义一致
+                    "enter" => this.deliver_selected(!ev.keystroke.modifiers.control, cx),
                     "p" if ev.keystroke.modifiers.control => this.toggle_pin_selected(cx),
                     key if ev.keystroke.modifiers.alt => {
                         if let Some(n) = key.parse::<usize>().ok().filter(|n| (1..=5).contains(n)) {
@@ -658,6 +816,16 @@ impl Render for ClipboardView {
                     .child(search_input(&self.input_state, cx)),
             )
             .child(self.render_filter_bar(cx))
+            .when_some(self.clear_error.clone(), |view, message| {
+                view.child(
+                    div()
+                        .px_3p5()
+                        .py_1()
+                        .text_xs()
+                        .text_color(cx.theme().danger)
+                        .child(message),
+                )
+            })
             .child(
                 h_flex()
                     .px_3p5()
@@ -733,31 +901,46 @@ impl Render for ClipboardView {
                     })
                     .when(!self.items.is_empty(), |body| {
                         body.child(
-                            div().relative().size_full().child(
-                                v_flex()
-                                    .id("clip-list")
-                                    .relative()
-                                    .size_full()
-                                    .child(
-                                        v_virtual_list(
-                                            cx.entity().clone(),
-                                            "clip-items",
-                                            self.item_sizes.clone(),
-                                            |this, visible_range, _, cx| {
-                                                visible_range
-                                                    .filter_map(|ix| {
-                                                        if ix >= this.items.len() {
-                                                            return None;
-                                                        }
-                                                        Some(this.render_item(ix, cx))
-                                                    })
-                                                    .collect()
-                                            },
+                            div()
+                                .relative()
+                                .size_full()
+                                // 外壳窗口坐标：键盘浮动预览的定位基准
+                                .child({
+                                    let cell = self.list_shell_bounds.clone();
+                                    canvas(move |bounds, _, _| cell.set(bounds), |_, _, _, _| {})
+                                        .absolute()
+                                        .size_full()
+                                })
+                                .child(
+                                    v_flex()
+                                        .id("clip-list")
+                                        .relative()
+                                        .size_full()
+                                        .child(
+                                            v_virtual_list(
+                                                cx.entity().clone(),
+                                                "clip-items",
+                                                self.item_sizes.clone(),
+                                                |this, visible_range, _, cx| {
+                                                    this.load_visible_thumbs(visible_range.clone());
+                                                    visible_range
+                                                        .filter_map(|ix| {
+                                                            if ix >= this.items.len() {
+                                                                return None;
+                                                            }
+                                                            Some(this.render_item(ix, cx))
+                                                        })
+                                                        .collect()
+                                                },
+                                            )
+                                            .track_scroll(&self.scroll_handle),
                                         )
-                                        .track_scroll(&self.scroll_handle),
-                                    )
-                                    .scrollbar(&self.scroll_handle, ScrollbarAxis::Vertical),
-                            ),
+                                        .scrollbar(&self.scroll_handle, ScrollbarAxis::Vertical),
+                                )
+                                // 键盘导航的浮动预览叠在列表之上，随光标行定位
+                                .when(self.keyboard_nav, |shell| {
+                                    shell.child(self.render_cursor_floating_preview(cx))
+                                }),
                         )
                     }),
             )
@@ -796,6 +979,19 @@ impl Render for HiddenTooltip {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
     }
+}
+
+/// 文件条目的展示名清单：content 按行存路径，取文件名（无文件名则原样）。
+fn file_display_names(content: &str) -> Vec<String> {
+    content
+        .lines()
+        .map(|line| {
+            std::path::Path::new(line).file_name().map_or_else(
+                || line.to_string(),
+                |name| name.to_string_lossy().into_owned(),
+            )
+        })
+        .collect()
 }
 
 /// 图像条目的悬停预览：放大图（Contain 保比例）+ 尺寸/体积尾注。

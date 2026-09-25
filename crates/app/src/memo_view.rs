@@ -3,7 +3,7 @@
 //! 两种形态共用一个视图——列表态浏览与检索，编辑态新建与修改，
 //! 由 [`MemoView::editor`] 是否存在切换。
 
-use std::{rc::Rc, sync::Arc, time::Duration};
+use std::{cell::Cell, rc::Rc, sync::Arc, time::Duration};
 
 use gpui::{prelude::FluentBuilder as _, *};
 use gpui_component::{
@@ -52,6 +52,16 @@ pub(crate) struct MemoView {
     selected: usize,
     /// 右键菜单打开的行；用于让悬停预览暂时退场，避免两个浮层叠加。
     context_menu_row: Option<i64>,
+    /// 键盘浮动预览的锚点（窗口坐标，prepaint 阶段捕获）：
+    /// 光标行与列表外壳各自的位置，浮层据此相对外壳定位
+    cursor_row_bounds: Rc<Cell<Bounds<Pixels>>>,
+    list_shell_bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// 最近一次选择移动是否来自键盘：只有键盘导航弹浮动预览，
+    /// 鼠标操作走原有悬停提示
+    keyboard_nav: bool,
+    /// 列表容器的焦点句柄：唤起时焦点落这里而非搜索框，
+    /// Delete / Enter 等列表键直接可用，搜索框由用户点击后聚焦。
+    focus_handle: FocusHandle,
     scroll_handle: VirtualListScrollHandle,
     editor: Option<MemoEditor>,
     _subscriptions: Vec<Subscription>,
@@ -89,6 +99,10 @@ impl MemoView {
             item_sizes: Rc::new(Vec::new()),
             selected: 0,
             context_menu_row: None,
+            cursor_row_bounds: Rc::new(Cell::new(Bounds::default())),
+            list_shell_bounds: Rc::new(Cell::new(Bounds::default())),
+            keyboard_nav: false,
+            focus_handle: cx.focus_handle(),
             scroll_handle: VirtualListScrollHandle::new(),
             editor: None,
             _subscriptions,
@@ -97,11 +111,10 @@ impl MemoView {
         view
     }
 
-    pub fn focus_search(&self, window: &mut Window, cx: &mut Context<Self>) {
-        // 编辑态下焦点属于内容框，不要抢回搜索框
+    pub fn focus_list(&self, window: &mut Window, cx: &mut Context<Self>) {
+        // 编辑态下焦点属于内容框，不要抢回列表
         if self.editor.is_none() {
-            self.search_state
-                .update(cx, |state, cx| state.focus(window, cx));
+            self.focus_handle.focus(window, cx);
         }
     }
 
@@ -135,6 +148,7 @@ impl MemoView {
         }
         let last = self.items.len() as i64 - 1;
         self.selected = (self.selected as i64 + delta).clamp(0, last) as usize;
+        self.keyboard_nav = true;
         self.scroll_handle
             .scroll_to_item(self.selected, ScrollStrategy::Nearest);
         cx.notify();
@@ -155,18 +169,15 @@ impl MemoView {
     }
 
     fn copy_id(&self, id: i64) {
-        if let Err(err) = self.service.paste_to(id, None) {
-            eprintln!("复制备忘失败: {err:#}");
-        }
+        self.service.copy_to_clipboard(id);
     }
 
     /// 将指定备忘交付到唤起 Wisp 前的窗口；目标失效时退化为仅复制。
+    /// 交付全程在服务的独立线程执行，UI 零阻塞。
     fn deliver_id(&self, id: i64, cx: &mut Context<Self>) {
         let target = paste_target(cx);
         hide_main_window(cx);
-        if let Err(err) = self.service.paste_to(id, target) {
-            eprintln!("交付备忘失败: {err:#}");
-        }
+        self.service.paste_to(id, target);
     }
 
     fn open_editor(&mut self, memo: Option<&Memo>, window: &mut Window, cx: &mut Context<Self>) {
@@ -244,7 +255,7 @@ impl MemoView {
     fn close_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.editor = None;
         self.reload(cx);
-        self.focus_search(window, cx);
+        self.focus_list(window, cx);
     }
 
     fn delete_selected(&mut self, cx: &mut Context<Self>) {
@@ -342,6 +353,15 @@ impl MemoView {
             .border_b_1()
             .border_color(cx.theme().border.opacity(0.3))
             .when(active, |row| row.bg(selection_background(cx)))
+            // 光标行捕获自身窗口坐标：键盘浮动预览的锚点
+            .when(active, |row| {
+                let cell = self.cursor_row_bounds.clone();
+                row.child(
+                    canvas(move |bounds, _, _| cell.set(bounds), |_, _, _, _| {})
+                        .absolute()
+                        .size_full(),
+                )
+            })
             .when(!active, |row| {
                 row.hover(|style| style.bg(cx.theme().accent.opacity(0.3)))
             })
@@ -417,6 +437,8 @@ impl MemoView {
                     this.deliver_id(id, cx);
                 } else {
                     this.selected = ix;
+                    // 鼠标操作关掉键盘浮动预览，避免与悬停提示双浮层
+                    this.keyboard_nav = false;
                     cx.notify();
                 }
             }))
@@ -453,33 +475,92 @@ impl MemoView {
             })
     }
 
+    /// 键盘导航时跟随光标的浮动预览（同剪贴板视图）：挂在列表外壳之上、
+    /// 光标行上方弹出，内容与悬停预览同源。
+    fn render_cursor_floating_preview(&self, cx: &Context<Self>) -> Div {
+        let Some(memo) = self.items.get(self.selected) else {
+            return div();
+        };
+        let row = self.cursor_row_bounds.get();
+        let shell = self.list_shell_bounds.get();
+        if shell.size.width <= px(0.) {
+            return div();
+        }
+
+        let char_count = memo.content.chars().count() as i64;
+        let preview = tooltip_preview(&memo.content, char_count);
+        let mut footnote = row_footnote(memo);
+        if !footnote.is_empty() {
+            footnote.push_str(" · ");
+        }
+        footnote.push_str(&format!("共 {char_count} 字符"));
+
+        // 行顶到外壳顶留有空间则向上弹（bottom 锚定、高度自适应），
+        // 否则改到行下方展开
+        let row_top_in_shell = row.origin.y - shell.origin.y;
+        let card = div()
+            .absolute()
+            .left(row.origin.x - shell.origin.x)
+            .w(px(480.))
+            .max_h(px(320.))
+            .overflow_hidden()
+            .bg(cx.theme().popover)
+            .text_color(cx.theme().popover_foreground)
+            .border_1()
+            .border_color(cx.theme().border)
+            .shadow_md()
+            .rounded(px(6.))
+            .px_2()
+            .py_1()
+            .child(memo_tooltip_body(preview, footnote, cx));
+        if row_top_in_shell > px(200.) {
+            card.bottom(shell.size.height - row_top_in_shell + px(4.))
+        } else {
+            card.top(row.bottom_left().y - shell.origin.y + px(4.))
+        }
+    }
+
     fn render_list(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         div().flex_1().min_h_0().child(
-            div().relative().size_full().child(
-                v_flex()
-                    .id("memo-list")
-                    .relative()
-                    .size_full()
-                    .child(
-                        v_virtual_list(
-                            cx.entity().clone(),
-                            "memo-items",
-                            self.item_sizes.clone(),
-                            |this, visible_range, _, cx| {
-                                visible_range
-                                    .filter_map(|ix| {
-                                        if ix >= this.items.len() {
-                                            return None;
-                                        }
-                                        Some(this.render_item(ix, cx))
-                                    })
-                                    .collect()
-                            },
+            div()
+                .relative()
+                .size_full()
+                // 外壳窗口坐标：键盘浮动预览的定位基准
+                .child({
+                    let cell = self.list_shell_bounds.clone();
+                    canvas(move |bounds, _, _| cell.set(bounds), |_, _, _, _| {})
+                        .absolute()
+                        .size_full()
+                })
+                .child(
+                    v_flex()
+                        .id("memo-list")
+                        .relative()
+                        .size_full()
+                        .child(
+                            v_virtual_list(
+                                cx.entity().clone(),
+                                "memo-items",
+                                self.item_sizes.clone(),
+                                |this, visible_range, _, cx| {
+                                    visible_range
+                                        .filter_map(|ix| {
+                                            if ix >= this.items.len() {
+                                                return None;
+                                            }
+                                            Some(this.render_item(ix, cx))
+                                        })
+                                        .collect()
+                                },
+                            )
+                            .track_scroll(&self.scroll_handle),
                         )
-                        .track_scroll(&self.scroll_handle),
-                    )
-                    .scrollbar(&self.scroll_handle, ScrollbarAxis::Vertical),
-            ),
+                        .scrollbar(&self.scroll_handle, ScrollbarAxis::Vertical),
+                )
+                // 键盘导航的浮动预览叠在列表之上，随光标行定位
+                .when(self.keyboard_nav, |shell| {
+                    shell.child(self.render_cursor_floating_preview(cx))
+                }),
         )
     }
 
@@ -689,6 +770,7 @@ impl Render for MemoView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .size_full()
+            .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
                 let ctrl = ev.keystroke.modifiers.control;
                 match ev.keystroke.key.as_str() {
@@ -703,6 +785,10 @@ impl Render for MemoView {
                     _ if this.is_editing() => {}
                     "up" => this.move_selection(-1, cx),
                     "down" => this.move_selection(1, cx),
+                    // 焦点在列表时 Enter 直接交付；焦点在搜索框时走
+                    // InputEvent::PressEnter 路径，两处语义一致
+                    "enter" => this.deliver_selected(!ctrl, cx),
+                    "delete" => this.delete_selected(cx),
                     "n" if ctrl => this.open_editor(None, window, cx),
                     "e" if ctrl => this.edit_selected(window, cx),
                     _ => {}

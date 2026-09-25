@@ -137,13 +137,14 @@ impl WispView {
         }
     }
 
-    /// 剪贴板有新内容时刷新——仅在该页可见时才有意义。
+    /// 后台变更触发的静默刷新——保留用户当前选择与滚动位置。
     pub fn reload_clips(&self, cx: &mut Context<Self>) {
         if self.page == Page::Clipboard {
-            self.clipboard.update(cx, |view, cx| view.reload(cx));
+            self.clipboard.update(cx, |view, cx| view.reload_silent(cx));
         }
     }
 
+    /// 用户主动操作（搜索、分类切换、页面进入）触发的完整刷新——重置选择。
     fn reload_active_page(&self, cx: &mut Context<Self>) {
         match self.page {
             Page::Home => self.home.update(cx, |view, cx| view.reload(cx)),
@@ -162,10 +163,10 @@ impl WispView {
                 .update(cx, |view, cx| view.focus_search(window, cx)),
             Page::Clipboard => self
                 .clipboard
-                .update(cx, |view, cx| view.focus_search(window, cx)),
+                .update(cx, |view, cx| view.focus_list(window, cx)),
             Page::Memo => self
                 .memos
-                .update(cx, |view, cx| view.focus_search(window, cx)),
+                .update(cx, |view, cx| view.focus_list(window, cx)),
             Page::Ip => self.ip.update(cx, |view, cx| view.focus(window, cx)),
             Page::Settings => self.settings.update(cx, |view, cx| view.focus(window, cx)),
         }
