@@ -76,8 +76,8 @@ impl ClipStore {
         let hash = fingerprint(content.as_bytes());
 
         let touched = conn.execute(
-            "UPDATE clips SET created_at = ?1 WHERE hash = ?2 AND content = ?3",
-            params![now, hash, content],
+            "UPDATE clips SET created_at = ?1 WHERE hash = ?2 AND content = ?3 AND kind = ?4",
+            params![now, hash, content, ClipKind::Text as i64],
         )?;
 
         if touched == 0 {
@@ -151,7 +151,7 @@ impl ClipStore {
         let keyword = keyword.trim();
 
         let mut sql = String::from(
-            "SELECT id, kind, content, preview, pinned, created_at, thumb FROM clips WHERE 1 = 1",
+            "SELECT id, kind, content, preview, pinned, created_at FROM clips WHERE 1 = 1",
         );
         let mut args: Vec<String> = Vec::new();
 
@@ -195,10 +195,26 @@ impl ClipStore {
                 preview: row.get(3)?,
                 pinned: row.get::<_, i64>(4)? != 0,
                 created_at: row.get(5)?,
-                thumb: row.get(6)?,
+                thumb: None,
             })
         })?;
 
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// 一次加载可视区所需的图像缩略图，避免渲染每一行时分别查库。
+    pub fn thumbs_of(&self, ids: &[i64]) -> Result<Vec<(i64, Vec<u8>)>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let placeholders = vec!["?"; ids.len()].join(",");
+        let sql = format!(
+            "SELECT id, thumb FROM clips WHERE id IN ({placeholders}) AND thumb IS NOT NULL"
+        );
+        let conn = self.conn.lock().expect("clip store poisoned");
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(ids), |row| Ok((row.get(0)?, row.get(1)?)))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
@@ -637,7 +653,13 @@ mod tests {
         assert_eq!(images.len(), 1);
         assert_eq!(images[0].content, path);
         assert_eq!(images[0].preview, "800×600 · 12.3 KB");
-        assert_eq!(images[0].thumb.as_deref(), Some(b"thumb-png".as_slice()));
+        // 列表不带 BLOB；可视区批量读取时忽略不存在的 ID。
+        assert!(images[0].thumb.is_none());
+        assert_eq!(
+            store.thumbs_of(&[images[0].id, -1]).unwrap(),
+            vec![(images[0].id, b"thumb-png".to_vec())]
+        );
+        assert!(store.thumbs_of(&[]).unwrap().is_empty());
         // 文本分类不含图像；全文检索不命中路径
         assert!(store.query(ClipFilter::Text, "", 10).unwrap().is_empty());
         assert!(store.query(ClipFilter::All, "00ff", 10).unwrap().is_empty());

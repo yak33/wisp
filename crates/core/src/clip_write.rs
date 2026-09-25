@@ -11,7 +11,7 @@
 use anyhow::{Context as _, Result};
 use windows::{
     Win32::{
-        Foundation::{GetLastError, HANDLE, WIN32_ERROR},
+        Foundation::{GetLastError, GlobalFree, HANDLE, HGLOBAL, WIN32_ERROR},
         Graphics::Gdi::{BI_BITFIELDS, BITMAPV5HEADER},
         System::{
             DataExchange::{
@@ -122,6 +122,8 @@ unsafe fn global_with_data(bytes: &[u8]) -> Result<HANDLE> {
         let handle = GlobalAlloc(GHND, bytes.len()).context("GlobalAlloc 失败")?;
         let dst = GlobalLock(handle) as *mut u8;
         if dst.is_null() {
+            // 句柄尚未交给剪贴板，锁定失败时仍由本进程负责释放。
+            _ = GlobalFree(Some(handle));
             return Err(anyhow::anyhow!("GlobalLock 失败"));
         }
         std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, bytes.len());
@@ -138,7 +140,12 @@ fn set_format(format: u32, bytes: &[u8]) -> std::result::Result<(), WIN32_ERROR>
     let result = unsafe { SetClipboardData(format, Some(handle)) };
     match result {
         Ok(_) => Ok(()),
-        Err(_) => Err(unsafe { GetLastError() }),
+        Err(_) => {
+            // SetClipboardData 失败时 HGLOBAL 所有权仍归调用方，必须显式释放
+            let err = unsafe { GetLastError() };
+            _ = unsafe { GlobalFree(Some(HGLOBAL(handle.0))) };
+            Err(err)
+        }
     }
 }
 

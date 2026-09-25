@@ -446,7 +446,10 @@ fn main() {
         let db_path = data_directory.database_path();
         let clipboard_service =
             Arc::new(ClipboardService::start(&db_path, changed_tx).expect("启动剪贴板服务失败"));
-        let memo_service = Arc::new(MemoService::open(&db_path).expect("打开备忘库失败"));
+        let memo_service = Arc::new(
+            MemoService::open(&db_path, clipboard_service.suppress_handle())
+                .expect("打开备忘库失败"),
+        );
         // 与数据库同目录的轻量配置（上次页面等），进程重启后恢复
         let config = Config::load(&db_path.with_file_name("wisp.cfg"));
 

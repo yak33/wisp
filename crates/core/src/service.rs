@@ -128,14 +128,25 @@ impl ClipboardService {
             images_dir,
             mutation_guard,
             changed_tx,
-            suppress_until,
+            suppress_until: suppress_until.clone(),
             _watcher: watcher,
         })
+    }
+
+    /// 暴露抑制窗句柄，供 MemoService 等外部服务在交付时同步开启，
+    /// 避免 watcher 把自家交付读回入库。
+    pub fn suppress_handle(&self) -> Arc<AtomicI64> {
+        self.suppress_until.clone()
     }
 
     /// 按分类与关键字检索。空关键字返回该分类下最近记录；置顶项恒在最前。
     pub fn query(&self, filter: ClipFilter, keyword: &str, limit: usize) -> Vec<Clip> {
         self.store.query(filter, keyword, limit).unwrap_or_default()
+    }
+
+    /// 批量读取可视区缩略图，不把 BLOB 带进每次列表检索。
+    pub fn thumbs_of(&self, ids: &[i64]) -> Vec<(i64, Vec<u8>)> {
+        self.store.thumbs_of(ids).unwrap_or_default()
     }
 
     /// 将指定条目写回系统剪贴板并回顶（写回前开启回环抑制窗，
