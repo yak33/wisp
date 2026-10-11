@@ -47,6 +47,16 @@ const PREVIEW_CACHE_MAX: usize = 12;
 /// 缩略图缓存上限（条），达到上限时整体清空——防长会话浏览累积 GPU 纹理
 const THUMB_CACHE_MAX: usize = 200;
 
+/// 列表刷新后键盘光标的选择策略
+enum SelectionReset {
+    /// 重置到首条（搜索、分类切换）
+    First,
+    /// 清除选中（进入页面）
+    Clear,
+    /// 尽量保留原选中（后台静默刷新）
+    Keep,
+}
+
 pub(crate) struct ClipboardView {
     service: Arc<ClipboardService>,
     input_state: Entity<InputState>,
@@ -57,8 +67,9 @@ pub(crate) struct ClipboardView {
     unpinned_count: usize,
     clear_error: Option<String>,
     item_sizes: Rc<Vec<Size<Pixels>>>,
-    /// 键盘光标行（↑↓/Enter/Ctrl+P 的作用对象）
-    selected: usize,
+    /// 键盘光标行（↑↓/Enter/Ctrl+P 的作用对象）。
+    /// 进入页面时不选中任何条目，按 ↓ 从首条开始、按 ↑ 从末条开始。
+    selected: Option<usize>,
     /// 鼠标单击累积的多选集合（clip id）。两条起进入批量模式，底部出现操作栏。
     selection: BTreeSet<i64>,
     /// 右键菜单正打开的行。该行悬停提示让位，避免两个浮层互相干扰；
@@ -115,7 +126,7 @@ impl ClipboardView {
             unpinned_count: 0,
             clear_error: None,
             item_sizes: Rc::new(Vec::new()),
-            selected: 0,
+            selected: None,
             selection: BTreeSet::new(),
             context_menu_row: None,
             focus_handle: cx.focus_handle(),
@@ -139,41 +150,59 @@ impl ClipboardView {
     /// 以当前分类与关键字重查列表。新内容置顶，故刷新后选中项归位到首条；
     /// 结果集变了，多选集合随之作废。
     pub fn reload(&mut self, cx: &mut Context<Self>) {
-        self.reload_with(cx, true);
+        self.reload_with(cx, SelectionReset::First);
+    }
+
+    /// 进入页面用的刷新：不选中任何条目，列表干净呈现。
+    pub fn reload_enter(&mut self, cx: &mut Context<Self>) {
+        self.reload_with(cx, SelectionReset::Clear);
     }
 
     /// 后台变更触发的静默刷新：保留用户当前选择与滚动位置，
     /// 窗口钉住时后台复制不会把用户操作状态强制归零。
     pub fn reload_silent(&mut self, cx: &mut Context<Self>) {
-        self.reload_with(cx, false);
+        self.reload_with(cx, SelectionReset::Keep);
     }
 
-    fn reload_with(&mut self, cx: &mut Context<Self>, reset_selection: bool) {
-        let selected_id = self.items.get(self.selected).map(|clip| clip.id);
+    fn reload_with(&mut self, cx: &mut Context<Self>, reset: SelectionReset) {
+        let selected_id = self
+            .selected
+            .and_then(|ix| self.items.get(ix))
+            .map(|clip| clip.id);
         self.items = self.service.query(self.filter, &self.keyword, QUERY_LIMIT);
         self.unpinned_count = self.service.unpinned_count();
         self.item_sizes = Rc::new(vec![size(ROW_WIDTH, ROW_HEIGHT); self.items.len()]);
-        if reset_selection {
-            self.selected = 0;
-            self.selection.clear();
-            self.context_menu_row = None;
-            self.scroll_handle.scroll_to_item(0, ScrollStrategy::Top);
-        } else {
-            // 新条目会插在前面，按 ID 找回原选中项，避免回车交付另一条。
-            self.selected = selected_id
-                .and_then(|id| self.items.iter().position(|clip| clip.id == id))
-                .unwrap_or(0);
-            let visible_ids: HashSet<i64> = self.items.iter().map(|clip| clip.id).collect();
-            self.selection.retain(|id| visible_ids.contains(id));
-            if self
-                .context_menu_row
-                .is_some_and(|id| !visible_ids.contains(&id))
-            {
+        match reset {
+            SelectionReset::First => {
+                self.selected = Some(0);
+                self.selection.clear();
                 self.context_menu_row = None;
+                self.scroll_handle.scroll_to_item(0, ScrollStrategy::Top);
             }
-            if !self.items.is_empty() {
-                self.scroll_handle
-                    .scroll_to_item(self.selected, ScrollStrategy::Nearest);
+            SelectionReset::Clear => {
+                self.selected = None;
+                self.selection.clear();
+                self.context_menu_row = None;
+                self.scroll_handle.scroll_to_item(0, ScrollStrategy::Top);
+            }
+            SelectionReset::Keep => {
+                // 新条目会插在前面，按 ID 找回原选中项，避免回车交付另一条。
+                self.selected =
+                    selected_id.and_then(|id| self.items.iter().position(|clip| clip.id == id));
+                let visible_ids: HashSet<i64> = self.items.iter().map(|clip| clip.id).collect();
+                self.selection.retain(|id| visible_ids.contains(id));
+                if self
+                    .context_menu_row
+                    .is_some_and(|id| !visible_ids.contains(&id))
+                {
+                    self.context_menu_row = None;
+                }
+                if let Some(selected) = self.selected
+                    && !self.items.is_empty()
+                {
+                    self.scroll_handle
+                        .scroll_to_item(selected, ScrollStrategy::Nearest);
+                }
             }
         }
         cx.notify();
@@ -188,7 +217,7 @@ impl ClipboardView {
     ///
     /// 两种情形都先隐藏窗口——粘贴链路依赖 Wisp 让出前台。
     fn deliver_selected(&mut self, paste: bool, cx: &mut Context<Self>) {
-        let Some(clip) = self.items.get(self.selected) else {
+        let Some(clip) = self.selected.and_then(|ix| self.items.get(ix)) else {
             return;
         };
         if paste {
@@ -214,7 +243,7 @@ impl ClipboardView {
         let Some(clip) = self.items.get(ix) else {
             return;
         };
-        self.selected = ix;
+        self.selected = Some(ix);
         // 鼠标操作关掉键盘浮动预览，避免与悬停提示双浮层
         self.keyboard_nav = false;
         if !self.selection.remove(&clip.id) {
@@ -302,20 +331,26 @@ impl ClipboardView {
             return;
         }
         let last = self.items.len() as i64 - 1;
-        self.selected = (self.selected as i64 + delta).clamp(0, last) as usize;
+        // 无选中时 ↓ 从首条开始、↑ 从末条开始
+        let next = match self.selected {
+            Some(ix) => (ix as i64 + delta).clamp(0, last),
+            None if delta > 0 => 0,
+            None => last,
+        };
+        self.selected = Some(next as usize);
         self.keyboard_nav = true;
         self.scroll_handle
-            .scroll_to_item(self.selected, ScrollStrategy::Nearest);
+            .scroll_to_item(next as usize, ScrollStrategy::Nearest);
         cx.notify();
     }
 
     fn toggle_pin_selected(&mut self, cx: &mut Context<Self>) {
-        if let Some(clip) = self.items.get(self.selected) {
+        if let Some(clip) = self.selected.and_then(|ix| self.items.get(ix)) {
             let id = clip.id;
             let keep = self.selected;
             if self.service.toggle_pin(id).is_ok() {
                 self.reload(cx);
-                self.selected = keep.min(self.items.len().saturating_sub(1));
+                self.selected = keep.filter(|ix| *ix < self.items.len());
             }
         }
     }
@@ -403,7 +438,7 @@ impl ClipboardView {
 
     fn render_row(&self, ix: usize, cx: &Context<Self>) -> Div {
         let clip = &self.items[ix];
-        let is_selected = ix == self.selected;
+        let is_selected = self.selected == Some(ix);
         let in_set = self.selection.contains(&clip.id);
         let is_image = clip.kind == ClipKind::Image;
 
@@ -626,7 +661,7 @@ impl ClipboardView {
     /// 键盘导航时跟随光标的浮动预览：挂在列表外壳之上、光标行上方弹出，
     /// 内容与悬停预览同源。只有键盘移动光标才显示，鼠标操作仍走悬停提示。
     fn render_cursor_floating_preview(&self, cx: &Context<Self>) -> Div {
-        let Some(clip) = self.items.get(self.selected) else {
+        let Some(clip) = self.selected.and_then(|ix| self.items.get(ix)) else {
             return div();
         };
         let row = self.cursor_row_bounds.get();
@@ -790,7 +825,7 @@ impl Render for ClipboardView {
                         if this.selection.len() >= 2 {
                             this.selection.clear();
                             cx.notify();
-                        } else if let Some(clip) = this.items.get(this.selected)
+                        } else if let Some(clip) = this.selected.and_then(|ix| this.items.get(ix))
                             && this.service.delete(clip.id).is_ok()
                         {
                             this.reload(cx);
@@ -842,16 +877,21 @@ impl Render for ClipboardView {
                             .gap_2()
                             .items_center()
                             .child(
+                                // 带文字的 danger 按钮：仅图标时几乎不可见且
+                                // 命中区过小贴近右下角缩放区，实际难以点中
                                 Button::new("clear-history")
                                     .ghost()
                                     .small()
+                                    .danger()
                                     .icon(WispIcon::Trash)
+                                    .label("清空")
                                     .tooltip(if self.unpinned_count == 0 {
                                         "暂无可清空的历史"
                                     } else {
-                                        "清空剪贴板"
+                                        "清空全部未收藏的历史记录"
                                     })
                                     .disabled(self.unpinned_count == 0)
+                                    .occlude()
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.open_clear_history_dialog(window, cx)
                                     })),

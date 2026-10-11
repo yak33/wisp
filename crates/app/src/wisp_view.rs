@@ -144,12 +144,13 @@ impl WispView {
         }
     }
 
-    /// 用户主动操作（搜索、分类切换、页面进入）触发的完整刷新——重置选择。
+    /// 用户主动操作（搜索、分类切换、页面进入）触发的完整刷新。
+    /// 页面进入不选中任何条目——按 ↓ 才开始导航。
     fn reload_active_page(&self, cx: &mut Context<Self>) {
         match self.page {
             Page::Home => self.home.update(cx, |view, cx| view.reload(cx)),
-            Page::Clipboard => self.clipboard.update(cx, |view, cx| view.reload(cx)),
-            Page::Memo => self.memos.update(cx, |view, cx| view.reload(cx)),
+            Page::Clipboard => self.clipboard.update(cx, |view, cx| view.reload_enter(cx)),
+            Page::Memo => self.memos.update(cx, |view, cx| view.reload_enter(cx)),
             Page::Ip => self.ip.update(cx, |view, cx| view.reload(cx)),
             // 设置页所有状态现读现显，无需刷新
             Page::Settings => {}

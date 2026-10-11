@@ -49,7 +49,9 @@ pub(crate) struct MemoView {
     tags: Vec<TagSummary>,
     items: Vec<Memo>,
     item_sizes: Rc<Vec<Size<Pixels>>>,
-    selected: usize,
+    /// 键盘光标行（↑↓/Enter 的作用对象）。
+    /// 进入页面时不选中任何条目，按 ↓ 从首条开始、按 ↑ 从末条开始。
+    selected: Option<usize>,
     /// 右键菜单打开的行；用于让悬停预览暂时退场，避免两个浮层叠加。
     context_menu_row: Option<i64>,
     /// 键盘浮动预览的锚点（窗口坐标，prepaint 阶段捕获）：
@@ -79,7 +81,7 @@ impl MemoView {
                 InputEvent::Change => {
                     this.keyword = state.read(cx).value().to_string();
                     // 搜索即重选首条，与剪贴板视图一致
-                    this.selected = 0;
+                    this.selected = Some(0);
                     this.reload(cx);
                 }
                 InputEvent::PressEnter { secondary, .. } => this.deliver_selected(!secondary, cx),
@@ -97,7 +99,7 @@ impl MemoView {
             tags: Vec::new(),
             items: Vec::new(),
             item_sizes: Rc::new(Vec::new()),
-            selected: 0,
+            selected: None,
             context_menu_row: None,
             cursor_row_bounds: Rc::new(Cell::new(Bounds::default())),
             list_shell_bounds: Rc::new(Cell::new(Bounds::default())),
@@ -130,14 +132,20 @@ impl MemoView {
 
         self.items = self.service.list(&self.filter, &self.keyword);
         self.item_sizes = Rc::new(vec![size(ROW_WIDTH, ROW_HEIGHT); self.items.len()]);
-        self.selected = self.selected.min(self.items.len().saturating_sub(1));
+        self.selected = self.selected.filter(|ix| *ix < self.items.len());
         self.context_menu_row = None;
         cx.notify();
     }
 
+    /// 进入页面用的刷新：不选中任何条目，列表干净呈现。
+    pub fn reload_enter(&mut self, cx: &mut Context<Self>) {
+        self.selected = None;
+        self.reload(cx);
+    }
+
     fn set_filter(&mut self, filter: TagFilter, cx: &mut Context<Self>) {
         self.filter = filter;
-        self.selected = 0;
+        self.selected = Some(0);
         self.scroll_handle.scroll_to_item(0, ScrollStrategy::Top);
         self.reload(cx);
     }
@@ -147,16 +155,26 @@ impl MemoView {
             return;
         }
         let last = self.items.len() as i64 - 1;
-        self.selected = (self.selected as i64 + delta).clamp(0, last) as usize;
+        // 无选中时 ↓ 从首条开始、↑ 从末条开始
+        let next = match self.selected {
+            Some(ix) => (ix as i64 + delta).clamp(0, last),
+            None if delta > 0 => 0,
+            None => last,
+        };
+        self.selected = Some(next as usize);
         self.keyboard_nav = true;
         self.scroll_handle
-            .scroll_to_item(self.selected, ScrollStrategy::Nearest);
+            .scroll_to_item(next as usize, ScrollStrategy::Nearest);
         cx.notify();
     }
 
     /// 交付选中项：`paste` 为真时直接粘贴到唤起前的窗口，否则仅回填剪贴板。
     fn deliver_selected(&mut self, paste: bool, cx: &mut Context<Self>) {
-        let Some(id) = self.items.get(self.selected).map(|memo| memo.id) else {
+        let Some(id) = self
+            .selected
+            .and_then(|ix| self.items.get(ix))
+            .map(|memo| memo.id)
+        else {
             return;
         };
 
@@ -220,7 +238,7 @@ impl MemoView {
     }
 
     fn edit_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(memo) = self.items.get(self.selected).cloned() {
+        if let Some(memo) = self.selected.and_then(|ix| self.items.get(ix)).cloned() {
             self.open_editor(Some(&memo), window, cx);
         }
     }
@@ -259,7 +277,11 @@ impl MemoView {
     }
 
     fn delete_selected(&mut self, cx: &mut Context<Self>) {
-        if let Some(id) = self.items.get(self.selected).map(|memo| memo.id) {
+        if let Some(id) = self
+            .selected
+            .and_then(|ix| self.items.get(ix))
+            .map(|memo| memo.id)
+        {
             self.delete_id(id, cx);
         }
     }
@@ -341,7 +363,7 @@ impl MemoView {
 
     fn render_row(&self, ix: usize, cx: &Context<Self>) -> Div {
         let memo = &self.items[ix];
-        let active = ix == self.selected;
+        let active = self.selected == Some(ix);
         let footnote = row_footnote(memo);
 
         h_flex()
@@ -436,7 +458,7 @@ impl MemoView {
                 if ev.click_count() >= 2 {
                     this.deliver_id(id, cx);
                 } else {
-                    this.selected = ix;
+                    this.selected = Some(ix);
                     // 鼠标操作关掉键盘浮动预览，避免与悬停提示双浮层
                     this.keyboard_nav = false;
                     cx.notify();
@@ -450,7 +472,7 @@ impl MemoView {
             }))
             .context_menu(move |menu, _, cx| {
                 entity.update(cx, |view, cx| {
-                    view.selected = ix;
+                    view.selected = Some(ix);
                     view.context_menu_row = Some(id);
                     cx.notify();
                 });
@@ -478,7 +500,7 @@ impl MemoView {
     /// 键盘导航时跟随光标的浮动预览（同剪贴板视图）：挂在列表外壳之上、
     /// 光标行上方弹出，内容与悬停预览同源。
     fn render_cursor_floating_preview(&self, cx: &Context<Self>) -> Div {
-        let Some(memo) = self.items.get(self.selected) else {
+        let Some(memo) = self.selected.and_then(|ix| self.items.get(ix)) else {
             return div();
         };
         let row = self.cursor_row_bounds.get();
